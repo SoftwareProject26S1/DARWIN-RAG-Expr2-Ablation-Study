@@ -1,0 +1,27 @@
+[project]
+name = "darwin-rag-exp2"
+version = "0.1.0"
+description = "Reproducible DARWIN-RAG ablation experiment pipeline."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+darwin-exp2 = "darwin_rag_exp2.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/darwin_rag_exp2"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
