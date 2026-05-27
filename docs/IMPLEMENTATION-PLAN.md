@@ -33,6 +33,14 @@ Python 기반 ablation experiment 프로젝트이다. 실험 코드는 하나의
 별개의 실험 저장소이며, 이 프로젝트는 `Exp1`의 수집/학습 실험
 결과를 수정하거나 의존하지 않는다.
 
+## PR 테스트 게이트
+
+`Exp2`의 단계별 구현 PR은 `.github/workflows/python-tests.yml`에서
+Python 3.12와 잠금된 `uv` 환경으로 전체 `pytest` suite를 실행한다.
+`main` 보호 규칙은 `exp2-pytest` job check 성공을 merge 조건으로
+요구하며, 이후 Phase에서 추가되는 회귀 테스트도 같은 게이트에
+자동으로 포함된다.
+
 ## 초기 스코어링 함수와 RRF 설계 보정
 
 ### 원래 scoring 정의
