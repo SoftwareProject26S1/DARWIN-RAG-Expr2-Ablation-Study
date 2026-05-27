@@ -13,12 +13,13 @@
 ## Execution Rules
 
 - Follow `docs/WORKING-RULES.md`: conduct all ablation study work within this
-  standalone `Exp2` repository; `Exp1` is a separate project.
-- Start each phase or isolated phase task on a branch named
-  `<task-type>/exp2-<step>-<taskname>`. Git does not permit the originally
-  requested colon-separated display form as a branch ref.
-- Use Conventional Commit messages in the form
-  `<commit-type>: <한국어 메시지>`.
+  standalone `Exp2` repository; `Exp1` is a separate project, and the parent
+  repository submodule gitlink is updated only under the synchronization rule
+  in that document.
+- Start each phase or isolated phase task on an `Exp2` branch using the
+  canonical branch convention in `docs/WORKING-RULES.md` (for example,
+  `feat/phase2-data-audit`).
+- Use the canonical commit-message convention in `docs/WORKING-RULES.md`.
 - Retain raw input `data/raw/scatch_notices.jsonl` unchanged.
 - Add runtime dependency groups when their phase begins; Phase 1 installs only
   the package and test runner.
@@ -74,8 +75,8 @@ ablation study.
 
 **Actions**
 
-1. Clone this standalone repository and create branch
-   `feat/exp2-phase1-scaffold` following the executable branch convention in
+1. Clone this standalone repository and, for a new Phase 1 run, create branch
+   `feat/phase1-scaffold` following the canonical branch convention in
    `docs/WORKING-RULES.md`.
 2. Create a Python 3.12 `uv` package with a `darwin-exp2` console script and
    pytest development dependency.
