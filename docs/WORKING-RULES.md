@@ -63,6 +63,9 @@ docs/phase1-protocol
   기본 후보는 `feat`, `fix`, `docs`, `test`, `refactor`, `chore`이다.
 - `<step>`은 `phase1`부터 `phase12`까지의 단계 식별자를 사용한다.
 - `<taskname>`은 영문 소문자와 하이픈으로 간결하게 작성한다.
+- CI workflow처럼 여러 Phase에 공통 적용되는 저장소 기반 작업은
+  명시된 작업 범위를 반영한 별도 브랜치(예: `test/test-workflow`)에서
+  수행할 수 있다.
 - 브랜치 이름과 커밋 메시지 형식은 이 문서를 canonical source로
   삼으며, 단계별 실행 문서는 이 규칙을 재정의하지 않는다.
 
@@ -90,6 +93,23 @@ test: 데이터 감사 통계 회귀 테스트를 추가한다
 fix: 청크 토큰 상한 계산 오류를 수정한다
 docs: 검색 병합 평가 절차를 명확히 기록한다
 ```
+
+## Pull Request 테스트 규칙
+
+- 단계별 구현 브랜치는 `Exp2`의 `main` 브랜치를 대상으로 Pull
+  Request를 생성하며, `.github/workflows/python-tests.yml`의
+  `exp2-pytest` job check를 반드시 실행한다.
+- workflow는 PR에 포함된 `uv.lock`을 기준으로 Python 3.12 환경을
+  구성하고 `uv sync --locked --dev`와 `uv run --locked pytest`를
+  순서대로 실행한다. 잠금 파일이 변경된 의존성과 일치하지 않거나
+  테스트가 실패하면 PR을 merge하지 않는다.
+- GitHub repository ruleset 또는 branch protection에서 `main`에 대해
+  `exp2-pytest`를 required status check로 등록한다. 동일한
+  job 이름을 다른 workflow에서 재사용하지 않아 필수 check 판정을
+  모호하게 만들지 않는다.
+- 로컬 검증은 PR 검사와 별개로 유지한다. 커밋 전에는 해당 단계에서
+  지정한 테스트를 실행하고, PR 전에는 `uv run --locked pytest`로
+  전체 회귀 테스트를 실행한다.
 
 ## 단계 완료 규칙
 
