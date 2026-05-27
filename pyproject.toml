@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Reproducible DARWIN-RAG ablation experiment pipeline."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "orjson>=3.10",
+    "pydantic>=2.10",
+    "typer>=0.15",
+]
 
 [project.scripts]
 darwin-exp2 = "darwin_rag_exp2.cli:main"
