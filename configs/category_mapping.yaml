@@ -1,0 +1,14 @@
+primary_category_mapping:
+  "채용": "채용"
+  "장학": "장학"
+  "비교과·행사": "비교과·행사"
+  "학사": "학사"
+  "봉사": "봉사"
+  "국제교류": "국제교류"
+  "외국인유학생": "외국인유학생"
+  "교원채용": "교원채용"
+
+excluded_categories:
+  "기타": "ambiguous_or_mixed_site_category"
+  "미분류": "uncategorized_site_category"
+  "교직": "below_minimum_primary_population"
