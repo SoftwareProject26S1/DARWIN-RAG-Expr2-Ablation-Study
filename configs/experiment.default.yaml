@@ -30,10 +30,12 @@ chunking:
   classifier_max_tokens: 512
 
 retrieval:
+  normalize_embeddings: true
+  similarity_metric: cosine_via_inner_product
+  similarity_score_mapping: cosine_to_unit_interval
   candidate_k_per_partition: 50
   report_top_k: 10
   generation_context_top_n: 5
-  rrf_k: 60
   fixed_lambda_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
 models:

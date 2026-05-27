@@ -2,9 +2,9 @@
 
 > **For agentic workers:** Implement one phase at a time, run the listed verification, and do not begin the next phase until artifacts from the current phase are frozen.
 
-**Goal:** Build the reproducible Exp2 ablation pipeline for score-merge and Weighted-RRF DARWIN-RAG comparisons.
+**Goal:** Build the reproducible Exp2 ablation pipeline for normalized global score-merge DARWIN-RAG comparisons.
 
-**Architecture:** Offline data/model/index artifact builders feed a frozen query experiment runner. Primary reporting evaluates adaptive score merge; Weighted RRF is a secondary fusion sensitivity family.
+**Architecture:** Offline data/model/index artifact builders feed a frozen query experiment runner. Required reporting evaluates adaptive score merge directly; Weighted RRF may be added only as an optional extension after the primary experiment is frozen.
 
 **Tech Stack:** Python 3.12, uv, PyTorch/MPS, transformers, sentence-transformers, FAISS, MLX-LM, NumPy, SciPy, scikit-learn, PyArrow, Typer, PyYAML, Optuna, pytest.
 
@@ -42,9 +42,13 @@
 | 7 | BGE-M3 embeddings and FAISS indexes | Hashed frozen index manifest |
 | 8 | Query candidate pool and annotation contract | Valid dev 80/test 240 query files |
 | 9 | `B0`, `B1`, `B2-score`, `P-score` runners | Primary score-merge results |
-| 10 | `B2-wrrf`, `P-wrrf` runners | Secondary WRRF results |
-| 11 | MLX Qwen generation and metrics | Cached answers using identical Top-5 contexts |
-| 12 | Statistical, latency, and paper report export | Tables, confidence intervals, figures, final manifest |
+| 10 | MLX Qwen generation and metrics | Cached primary-variant answers using identical Top-5 contexts |
+| 11 | Statistical, latency, and paper report export | Primary tables, confidence intervals, and figures |
+| 12 | Primary artifact freeze and reproducibility closeout | Final manifest and frozen experiment bundle |
+
+After Phase 12, `B2-wrrf` and `P-wrrf` may be implemented as an optional
+supplemental extension. They are not completion criteria for the primary
+ablation study.
 
 ## Phase 1: Repository, Scaffold, And Protocol Documents
 
@@ -259,8 +263,10 @@ uv run darwin-exp2 train-classifier --mode crossfit --chunks artifacts/chunks/ch
 ```
 
 Expected evidence: every prediction row records a fold whose training
-`source_id` list excludes that row's source; official `mu_c`, `sigma_c`, and
-`lambda_c` artifacts refer only to out-of-fold probabilities.
+`source_id` list excludes that row's source; official `mu_c` and `sigma_c`
+refer only to out-of-fold probabilities. Any derived `lambda_c` artifact is
+explicitly labeled as a semantic-similarity mixture coefficient, not a BERT
+confidence value.
 
 ## Phase 7: Embeddings And Frozen FAISS Indexes
 
@@ -333,7 +339,23 @@ category/type distribution report, and frozen query hashes.
 **Purpose**
 
 Implement and tune the variant family that directly preserves the proposed
-document-level mixture score.
+document-level mixture score without an additional fusion algorithm.
+
+**Fixed score contract**
+
+```text
+s_norm(q,d) = (sim(q,d) + 1) / 2
+
+score_c(q,d) = lambda_c * s_norm(q,d)
+             + (1 - lambda_c) * P_calibrated(c | q)
+
+final_score(q,d) = max_c score_c(q,d)
+```
+
+`lambda_c` is the proportion of semantic similarity used in the final score;
+it is not the BERT confidence itself. `s_norm` is a shared fixed mapping for
+all score-merge variants, not a per-partition normalization or probability
+calibration step.
 
 **Files**
 
@@ -359,37 +381,12 @@ Expected evidence: the vanilla RRF invariance fixture proves it cannot
 distinguish fixed/adaptive lambda, while `B2-score` and `P-score` produce
 paired Top-10 test result files under frozen settings.
 
-## Phase 10: Weighted RRF Sensitivity Variants
+## Phase 10: Local Generation And Automated Metrics
 
 **Purpose**
 
-Assess whether retaining a rank-fusion formulation changes the adaptive
-weighting conclusion.
-
-**Files**
-
-- Create: `src/darwin_rag_exp2/retrieval/weighted_rrf.py`
-- Modify: `src/darwin_rag_exp2/retrieval/variants.py`
-- Modify: `src/darwin_rag_exp2/cli.py` to add `tune-wrrf` and `run-wrrf`
-- Create: `tests/retrieval/test_weighted_rrf.py`
-
-**Verification**
-
-```bash
-uv run pytest tests/retrieval/test_weighted_rrf.py
-uv run darwin-exp2 tune-wrrf --queries data/annotations/queries_dev.jsonl --indexes artifacts/indexes --output artifacts/settings/wrrf
-uv run darwin-exp2 run-wrrf --queries data/annotations/queries_test.jsonl --settings artifacts/settings/wrrf/frozen.yaml --output runs/wrrf
-```
-
-Expected evidence: `B2-wrrf` and `P-wrrf` outputs contain per-category
-`semantic_evidence` and `w(q,c)` values alongside final rankings.
-
-## Phase 11: Local Generation And Automated Metrics
-
-**Purpose**
-
-Convert each fixed retrieval result into a comparable generated answer without
-external model drift.
+Convert each frozen primary retrieval result into a comparable generated
+answer without external model drift.
 
 **Files**
 
@@ -406,14 +403,14 @@ external model drift.
 
 ```bash
 uv run pytest tests/generation
-uv run darwin-exp2 generate-answers --runs runs/primary runs/wrrf --queries data/annotations/queries_test.jsonl --model mlx-community/Qwen3-8B-4bit --output runs/generation
+uv run darwin-exp2 generate-answers --runs runs/primary --queries data/annotations/queries_test.jsonl --model mlx-community/Qwen3-8B-4bit --output runs/generation
 ```
 
-Expected evidence: all variants use exactly five context chunks per query,
-shared prompt/decoding configuration, cached answers, and automated EM,
-token-F1, ROUGE, and BERTScore result files.
+Expected evidence: all primary variants use exactly five context chunks per
+query, shared prompt/decoding configuration, cached answers, and automated
+EM, token-F1, ROUGE, and BERTScore result files.
 
-## Phase 12: Statistics, Latency, And Report Export
+## Phase 11: Statistics, Latency, And Report Export
 
 **Purpose**
 
@@ -433,14 +430,81 @@ hypotheses without modifying frozen experiment inputs.
 
 ```bash
 uv run pytest
-uv run darwin-exp2 report --primary runs/primary --secondary runs/wrrf --generation runs/generation --output runs/report
+uv run darwin-exp2 report --primary runs/primary --generation runs/generation --output runs/report
 ```
 
 Expected artifacts:
 
 - Primary table for `P-score` versus `B2-score` with paired differences,
   Wilcoxon p-value, and paired bootstrap 95 percent confidence interval.
-- Secondary WRRF and breakdown tables with Holm-adjusted p-values.
+- Primary category and query-type diagnostic breakdown tables.
 - Retrieval-only latency median/p95/p99 tables and plots.
 - Complete manifest linking raw-data, model, index, settings, query, and run
   hashes.
+
+## Phase 12: Primary Artifact Freeze And Reproducibility Closeout
+
+**Purpose**
+
+Freeze the score-merge experiment as the completed mandatory study before any
+supplemental fusion implementation is considered.
+
+**Files**
+
+- Modify: `src/darwin_rag_exp2/cli.py` to add `verify-manifest`
+- Create: `src/darwin_rag_exp2/evaluation/manifest.py`
+- Create: `tests/evaluation/test_manifest.py`
+- Create: `runs/final/PRIMARY-RESULTS.md`
+- Create: `runs/final/manifest.json`
+- Create: `runs/final/checksums.txt`
+- Create: `runs/final/environment.txt`
+
+**Actions**
+
+1. Copy or reference only frozen `B0`, `B1`, `B2-score`, and `P-score`
+   retrieval and generation results in the final manifest.
+2. Record dataset, query, model, index, settings, prompt, and report hashes.
+3. Record the executed verification commands and environment versions.
+4. Mark the primary study complete before beginning any optional extension.
+
+**Verification**
+
+```bash
+uv run pytest
+uv run darwin-exp2 verify-manifest --manifest runs/final/manifest.json
+```
+
+Expected artifacts: a hash-verifiable primary experiment bundle and a final
+summary whose central hypothesis test is `P-score > B2-score`.
+
+## Optional Extension A: Weighted RRF Sensitivity Variants
+
+**Prerequisite**
+
+Run this extension only after Phase 12 primary artifacts are frozen. Its
+outputs must not alter primary settings, metrics, or conclusion tables.
+
+**Purpose**
+
+Assess separately whether retaining a rank-fusion formulation changes the
+adaptive weighting observation.
+
+**Files**
+
+- Create: `src/darwin_rag_exp2/retrieval/weighted_rrf.py`
+- Modify: `src/darwin_rag_exp2/retrieval/variants.py`
+- Modify: `src/darwin_rag_exp2/cli.py` to add `tune-wrrf` and `run-wrrf`
+- Create: `tests/retrieval/test_weighted_rrf.py`
+- Create: `configs/optional.wrrf.yaml` with the fixed RRF constant
+
+**Verification**
+
+```bash
+uv run pytest tests/retrieval/test_weighted_rrf.py
+uv run darwin-exp2 tune-wrrf --queries data/annotations/queries_dev.jsonl --indexes artifacts/indexes --config configs/optional.wrrf.yaml --output artifacts/settings/wrrf
+uv run darwin-exp2 run-wrrf --queries data/annotations/queries_test.jsonl --settings artifacts/settings/wrrf/frozen.yaml --output runs/wrrf
+```
+
+Expected evidence: `B2-wrrf` and `P-wrrf` outputs contain per-category
+`semantic_evidence` and `w(q,c)` values alongside final rankings, reported as
+supplemental results only.

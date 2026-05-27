@@ -1,7 +1,7 @@
 # DARWIN-RAG Exp2 Implementation Plan
 
 > 작성일: 2026-05-27
-> 상태: Phase 1에서 확정한 구현 및 실험 프로토콜
+> 상태: Phase 1 protocol revision - score merge primary, WRRF optional
 > 입력 원천: `../../scatch_notices.jsonl`
 
 ## 연구 목적과 Exp2 범위
@@ -18,7 +18,7 @@ Python 기반 ablation experiment 프로젝트이다. 실험 코드는 하나의
 - 공지 본문의 재현 가능한 청킹
 - category classifier 학습, temperature scaling, crossfit 확률 산출
 - 공통 임베딩 및 통합/카테고리별 FAISS artifact 생성
-- score-merge 및 Weighted RRF 계열 ablation 실행
+- 정규화 점수 전역 병합 기반 primary ablation 실행
 - 고정된 로컬 LLM을 사용한 생성 평가 및 통계 리포트 출력
 
 다음 항목은 `Exp2`가 구현하지 않는다.
@@ -27,6 +27,7 @@ Python 기반 ablation experiment 프로젝트이다. 실험 코드는 하나의
 - OCR 또는 첨부 파일에서 추가 본문을 추출하는 파이프라인
 - 실서비스 API, 외부 데이터베이스, 배포 서버
 - 외부 API LLM 호출 기반의 본 평가
+- 필수 ablation 결과가 고정되기 전의 Weighted RRF 구현 또는 튜닝
 
 `Exp2`는 기존 실험 저장소의 `Exp1/`과 나란히 존재하는 독립 `uv`
 프로젝트이며, `Exp1/`의 수집/학습 실험 결과를 수정하지 않는다.
@@ -46,8 +47,14 @@ score_c(q,d) = lambda_c * sim(q,d)
 - `sim(q,d)`: 질의와 문서의 임베딩 코사인 유사도
 - `P_calibrated(c | q)`: 보정된 BERT가 질의 `q`를 카테고리 `c`로
   판단한 확률
-- `lambda_c`: ingestion 과정에서 카테고리별 문서 분류 confidence
-  분포로부터 사전 계산한 가중치
+- `lambda_c`: 카테고리 `c`에서 질의-문서 semantic similarity를 최종
+  점수에 얼마나 반영할지 결정하는 mixture coefficient
+
+`lambda_c`는 BERT confidence 값이나 확률 자체가 아니다. OOF category
+statistics를 입력으로 한 고정 mapping으로 산출하더라도, 그 출력의
+역할은 `sim(q,d)` 항의 반영 비율이다. 따라서 `lambda_c`가 높을수록
+semantic similarity 신호를 더 강하게 반영하고, 낮을수록 query
+category probability 신호를 더 강하게 반영한다.
 
 `B2`는 모든 카테고리에 동일한 `lambda_fixed`를 쓰고, `P`는
 카테고리마다 다른 `lambda_c`를 쓴다는 것이 원래의 비교 의도이다.
@@ -98,6 +105,15 @@ score_c(q,d) = lambda_c * s_norm(q,d)
 final_score(q,d) = max_c score_c(q,d)
 ```
 
+여기서 L2 정규화는 모든 파티션의 inner product를 동일한 cosine
+similarity로 해석하기 위한 벡터 처리이다. `s_norm`은 cosine score의
+범위를 `[0, 1]`로 옮기는 고정 affine mapping이며 relevance probability
+calibration이 아니다. 이 mapping은 `B2-score`와 `P-score` 모두에
+동일하게 적용하고, 별도의 RRF 또는 파티션별 재정규화 없이 원래
+mixture score를 전역 정렬에 직접 사용한다. 또한 category-specific
+`lambda_c`와 결합될 때 순위 함수를 구성하는 명시적 설계 선택이므로,
+실험 이후 임의로 다른 similarity mapping으로 교체하지 않는다.
+
 실행 규칙은 다음과 같다.
 
 1. soft routing으로 선택된 각 카테고리 인덱스에서
@@ -118,11 +134,14 @@ final_score(q,d) = max_c score_c(q,d)
 본 연구의 primary hypothesis는 test query에서
 `P-score > B2-score`이다.
 
-### Secondary: Weighted RRF
+### Optional Follow-Up: Weighted RRF
 
-RRF의 rank 기반 결합 특성을 유지하는 추가 실험에서는 카테고리
-리스트 자체에 신뢰도 가중치를 부여한다. 한 카테고리의 top result
-하나에 과도하게 의존하지 않도록 top-5 의미 유사도 평균을 사용한다.
+Weighted RRF는 필수 ablation pipeline에 포함하지 않는다. `B0`,
+`B1`, `B2-score`, `P-score`의 retrieval, generation, report artifact가
+모두 고정된 이후에만 추가적인 fusion sensitivity extension으로
+구현할 수 있다. 구현하는 경우에는 카테고리 리스트 자체에 투표
+가중치를 부여하며, 한 카테고리의 top result 하나에 과도하게
+의존하지 않도록 top-5 의미 유사도 평균을 사용한다.
 
 ```text
 semantic_evidence(q,c) = mean(top 5 s_norm values in category c)
@@ -136,7 +155,8 @@ WRRF(d) = sum_c w(q,c) / (60 + rank_c(d))
 이 구조에서는 `lambda_c`가 개별 문서의 mixture 계수가 아니라,
 카테고리 검색 리스트가 전역 순위에 행사하는 투표 강도의 mixture
 계수로 해석된다. 그러므로 WRRF는 원래 score 식을 직접 검증하는
-primary 모델이 아니라 fusion 방식에 대한 sensitivity analysis이다.
+primary 모델이 아니라, primary 결과가 확정된 뒤 선택적으로 수행하는
+supplemental sensitivity analysis이다.
 
 ### 최종 variant와 튜닝 통제
 
@@ -146,8 +166,13 @@ primary 모델이 아니라 fusion 방식에 대한 sensitivity analysis이다.
 | `B1` | query top-1 category | similarity 파티션 순위 | hard-routing baseline |
 | `B2-score` | soft routing | fixed-lambda score merge | primary comparator |
 | `P-score` | soft routing | adaptive-lambda score merge | primary proposal |
-| `B2-wrrf` | soft routing | fixed-lambda Weighted RRF | secondary comparator |
-| `P-wrrf` | soft routing | adaptive-lambda Weighted RRF | secondary proposal |
+
+다음 variant는 mandatory 결과를 모두 동결한 이후에만 추가할 수 있다.
+
+| Optional variant | Routing | Fusion / scoring | 역할 |
+|---|---|---|---|
+| `B2-wrrf` | soft routing | fixed-lambda Weighted RRF | supplemental comparator |
+| `P-wrrf` | soft routing | adaptive-lambda Weighted RRF | supplemental proposal |
 
 모든 soft-routing variant는 같은 `K_ingest`와 `theta_route`를 사용한다.
 먼저 `B2-score`의 dev `nDCG@10` 기준으로 두 threshold를 선택해
@@ -289,8 +314,8 @@ split label을 전달한다.
 
 ### Classifier 공식 artifact: source-level crossfit
 
-공식 인덱스와 `lambda_c` 통계는 stratified 5-fold crossfit으로
-생성한다.
+공식 인덱스 입력과 `lambda_c` 산출용 category statistics는 stratified
+5-fold crossfit으로 생성한다.
 
 1. 품질 필터를 통과한 primary source documents를 category별 비율을
    유지하며 5 folds로 분리한다.
@@ -307,7 +332,8 @@ split label을 전달한다.
 - `P_calibrated(c | d) >= K_ingest`인 복수 category index에 동일
   `chunk_id`를 등록하는 partition assignment
 - 어떤 threshold도 만족하지 못하는 문서의 top-1 fallback category
-- category별 `mu_c`, `sigma_c`, adaptive `lambda_c`
+- category별 `mu_c`, `sigma_c`와, 이를 입력으로 고정 mapping에서
+  산출한 semantic-mixture coefficient `lambda_c`
 
 질의 분류용 최종 classifier는 admitted corpus 전체에서 별도 학습하고
 calibration을 적용한다. 개발 중 end-to-end wiring을 빨리 검증하기
@@ -355,8 +381,10 @@ calibration을 적용한다. 개발 중 end-to-end wiring을 빨리 검증하기
 - primary 비교는 test query별 `P-score` 대 `B2-score` paired
   difference에 대해 Wilcoxon signed-rank test와 paired bootstrap
   95% confidence interval을 보고한다.
-- `P-wrrf` 대 `B2-wrrf`, fusion family 간 결과, confidence/category
-  breakdown은 secondary analysis이며 Holm correction을 적용한다.
+- category breakdown은 primary 결과의 진단 분석으로 함께 보고한다.
+- WRRF를 후속 구현한 경우에만 `P-wrrf` 대 `B2-wrrf` 및 fusion family
+  비교를 supplemental analysis로 별도 보고하며 Holm correction을
+  적용한다.
 - latency 주 분석은 LLM 생성 시간을 제외한 retrieval path이다.
 
 ## RAG 생성 LLM 후보와 추천
@@ -392,7 +420,7 @@ template, 동일 decoding parameter와 동일 Top-5 context를 사용한다.
 - context: 모든 variant에서 검색 결과 Top-5만 제공
 - output: `(run_manifest_hash, variant, query_id)` 키로 캐시
 - generation metrics: Exact Match, token F1, ROUGE, BERTScore
-- excluded metric: 이번 primary/secondary 결과에서는 LLM-as-judge
+- excluded metric: 이번 primary 결과에서는 LLM-as-judge
   사용하지 않음
 
 ## 구현 산출물과 재현성 계약

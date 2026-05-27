@@ -11,7 +11,8 @@ corpus.
   `../../scatch_notices.jsonl`.
 - Crawling, OCR, and attachment text extraction are outside this experiment.
 - Primary retrieval analysis uses normalized global score merge.
-- Weighted RRF is retained as a secondary fusion sensitivity analysis.
+- Weighted RRF is deferred to an optional extension after the primary
+  score-merge experiment is complete and frozen.
 
 ## Documents
 
