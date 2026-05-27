@@ -5,13 +5,12 @@
 
 ## 작업 경로
 
-- Ablation Study와 관련된 모든 코드, 설정, 문서, 테스트, 실험 산출물
-  작업은 반드시 `./Experiments/Exp2` 내부에서 수행한다.
-- 기존 실험인 `./Experiments/Exp1`은 읽기 전용 참고 대상으로만
-  사용하며, Exp2 작업 과정에서 수정하지 않는다.
-- 원본 입력인 `./scatch_notices.jsonl`은 Exp2가 소비하는 외부 입력이며
-  수정하지 않는다. Exp2에서 생성되는 정제 데이터와 실험 결과만
-  `Exp2` 하위 artifact 경로에 저장한다.
+- Ablation Study와 관련된 모든 코드, 설정, 문서, 테스트, 입력 데이터,
+  실험 산출물 작업은 반드시 이 `Exp2` 저장소 내부에서 수행한다.
+- `Exp1`은 별개의 실험 저장소이며 Exp2 작업 범위에 포함하지 않는다.
+- 원본 입력인 `data/raw/scatch_notices.jsonl`은 Exp2가 소유하는
+  read-only baseline 입력이다. 생성되는 정제 데이터와 실험 결과는
+  `artifacts/` 또는 `runs/` 경로에 저장한다.
 
 ## 단계별 브랜치 규칙
 

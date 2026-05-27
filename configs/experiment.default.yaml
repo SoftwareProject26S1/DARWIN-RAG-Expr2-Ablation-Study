@@ -16,7 +16,7 @@ experiment:
     - "교직"
 
 data:
-  source_export: ../../scatch_notices.jsonl
+  source_export: data/raw/scatch_notices.jsonl
   min_primary_source_documents: 100
   query_type_non_single_fraction: 0.30
 

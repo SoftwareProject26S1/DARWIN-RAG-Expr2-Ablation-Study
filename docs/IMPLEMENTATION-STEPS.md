@@ -12,14 +12,14 @@
 
 ## Execution Rules
 
-- Follow `docs/WORKING-RULES.md`: conduct all ablation study work within
-  `./Experiments/Exp2` and do not edit `Exp1/`.
+- Follow `docs/WORKING-RULES.md`: conduct all ablation study work within this
+  standalone `Exp2` repository; `Exp1` is a separate project.
 - Start each phase or isolated phase task on a branch named
   `<task-type>/exp2-<step>-<taskname>`. Git does not permit the originally
   requested colon-separated display form as a branch ref.
 - Use Conventional Commit messages in the form
   `<commit-type>: <한국어 메시지>`.
-- Retain raw input `../../scatch_notices.jsonl` unchanged.
+- Retain raw input `data/raw/scatch_notices.jsonl` unchanged.
 - Add runtime dependency groups when their phase begins; Phase 1 installs only
   the package and test runner.
 - Write a test that fails for the phase's new behavior before adding that
@@ -33,7 +33,7 @@
 
 | Phase | Work | Completion Evidence |
 |---|---|---|
-| 1 | Repository checkout, `Exp2` scaffold, official documents | `Exp1/` untouched, package/docs present, smoke test passes |
+| 1 | Standalone repository, `Exp2` scaffold, official documents | Independent origin configured, package/docs present, smoke test passes |
 | 2 | `scatch_notices.jsonl` importer and dataset audit | Audit JSON/Markdown reproduces Phase 1 baseline counts |
 | 3 | Category admission and quality filtering | Primary 8-category corpus and exclusion report |
 | 4 | Improved chunker and artifact schema | JSONL/Parquet chunks and token-cap tests |
@@ -54,9 +54,9 @@ ablation study.
 
 **Inputs**
 
-- Git repository `https://github.com/SoftwareProject26S1/DARWIN-RAG-Paper.git`
+- Git repository `https://github.com/SoftwareProject26S1/DARWIN-RAG-Expr2-Ablation-Study.git`
 - Approved design decisions in this implementation plan
-- Read-only raw export at `../../scatch_notices.jsonl`
+- Repository-owned read-only raw export at `data/raw/scatch_notices.jsonl`
 
 **Files**
 
@@ -74,9 +74,9 @@ ablation study.
 
 **Actions**
 
-1. Clone the existing repository into `Experiments/`, verify that `Exp1/`
-   exists, and create branch `feat/exp2-phase1-scaffold` following the
-   executable branch convention in `docs/WORKING-RULES.md`.
+1. Clone this standalone repository and create branch
+   `feat/exp2-phase1-scaffold` following the executable branch convention in
+   `docs/WORKING-RULES.md`.
 2. Create a Python 3.12 `uv` package with a `darwin-exp2` console script and
    pytest development dependency.
 3. Add a failing smoke test for the CLI package import and phase readiness
@@ -93,15 +93,15 @@ uv lock
 uv run pytest
 uv run darwin-exp2
 git diff --name-only origin/main...HEAD
-git diff --name-only origin/main...HEAD -- Exp1
+git remote get-url origin
 ```
 
 Expected evidence:
 
 - `uv run pytest` reports one passing smoke test.
 - `uv run darwin-exp2` prints `DARWIN-RAG Exp2: Phase 1 scaffold ready.`
-- Changes listed against `origin/main` are under `Exp2/` only.
-- The `Exp1`-limited diff command prints no paths.
+- Changes listed against `origin/main` belong only to this standalone project.
+- `git remote get-url origin` prints the Exp2 ablation study repository URL.
 
 ## Phase 2: Raw Notice Importer And Audit
 
@@ -137,7 +137,7 @@ baseline that guards later category and chunk decisions.
 
 ```bash
 uv run pytest tests/data
-uv run darwin-exp2 audit-data --input ../../scatch_notices.jsonl --output artifacts/audit/raw
+uv run darwin-exp2 audit-data --input data/raw/scatch_notices.jsonl --output artifacts/audit/raw
 ```
 
 Expected artifacts: `artifacts/audit/raw/audit.json` and `audit.md` with the
@@ -171,7 +171,7 @@ separate unusable or interpretively weak documents before any model training.
 
 ```bash
 uv run pytest tests/data/test_filtering.py
-uv run darwin-exp2 prepare-corpus --input ../../scatch_notices.jsonl --config configs/experiment.default.yaml --output artifacts/corpus
+uv run darwin-exp2 prepare-corpus --input data/raw/scatch_notices.jsonl --config configs/experiment.default.yaml --output artifacts/corpus
 ```
 
 Expected artifacts: admitted and excluded source JSONL files, category counts,

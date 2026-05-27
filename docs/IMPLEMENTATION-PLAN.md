@@ -2,7 +2,7 @@
 
 > 작성일: 2026-05-27
 > 상태: Phase 1 protocol revision - score merge primary, WRRF optional
-> 입력 원천: `../../scatch_notices.jsonl`
+> 입력 원천: `data/raw/scatch_notices.jsonl`
 
 ## 연구 목적과 Exp2 범위
 
@@ -29,8 +29,9 @@ Python 기반 ablation experiment 프로젝트이다. 실험 코드는 하나의
 - 외부 API LLM 호출 기반의 본 평가
 - 필수 ablation 결과가 고정되기 전의 Weighted RRF 구현 또는 튜닝
 
-`Exp2`는 기존 실험 저장소의 `Exp1/`과 나란히 존재하는 독립 `uv`
-프로젝트이며, `Exp1/`의 수집/학습 실험 결과를 수정하지 않는다.
+`Exp2`는 독립 Git 저장소로 관리되는 `uv` 프로젝트이다. `Exp1`은
+별개의 실험 저장소이며, 이 프로젝트는 `Exp1`의 수집/학습 실험
+결과를 수정하거나 의존하지 않는다.
 
 ## 초기 스코어링 함수와 RRF 설계 보정
 
@@ -190,7 +191,7 @@ lambda_c = sigmoid(alpha * (mu_c - tau) - rho * sigma_c)
 
 ### 입력 레코드와 현재 audit
 
-실험의 원천 파일은 프로젝트 상위에 보존된 `scatch_notices.jsonl`이다.
+실험의 원천 파일은 저장소 내부의 `data/raw/scatch_notices.jsonl`이다.
 한 줄은 하나의 웹 공지 원문이며, 다음 필드를 가진다.
 
 | 필드 | 용도 |
@@ -241,9 +242,9 @@ primary category별 usable source document 수가 100건 이상인지 다시
 | 토큰 budget 및 category classifier | [`klue/bert-base`](https://huggingface.co/klue/bert-base) | 한국어 BERT 분류 모델이며 최종 classifier 입력 한도 기준을 제공 |
 | dense retrieval embedding | [`BAAI/bge-m3`](https://huggingface.co/BAAI/bge-m3) | 다국어 dense retrieval 및 긴 문맥 지원으로 공지의 의미 단위를 보존 |
 
-기존 `Exp1/src/chunking.py` 계열은 `klue/bert-base` tokenizer를
-기준으로 본문 목표 384 tokens, overlap 64 tokens를 적용했다. 이
-문단/문장 우선 전략은 유지한다. 반면 짧은 최대 입력 길이를 갖는
+분류기 입력 한도와 재현성 요구에 따라 `klue/bert-base` tokenizer를
+기준으로 본문 목표 384 tokens, overlap 64 tokens를 적용하고
+문단/문장 우선 전략을 사용한다. 반면 짧은 최대 입력 길이를 갖는
 경량 sentence encoder를 384-token 청크와 결합하면 검색 임베딩에서
 뒤쪽 정보가 truncate될 수 있으므로, `Exp2` retrieval 기본 embedder는
 `BAAI/bge-m3`로 고정한다.

@@ -7,8 +7,8 @@ corpus.
 
 ## Scope
 
-- Input begins with the existing notice export at
-  `../../scatch_notices.jsonl`.
+- Input begins with the repository-owned notice export at
+  `data/raw/scatch_notices.jsonl`.
 - Crawling, OCR, and attachment text extraction are outside this experiment.
 - Primary retrieval analysis uses normalized global score merge.
 - Weighted RRF is deferred to an optional extension after the primary
