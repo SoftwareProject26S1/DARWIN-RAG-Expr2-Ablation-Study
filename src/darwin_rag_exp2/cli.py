@@ -8,12 +8,15 @@ from typing import Annotated
 
 import typer
 
+from .data.artifacts import write_chunk_artifacts
 from .data.audit import audit_notice_export, write_audit_artifacts
+from .data.chunking import build_chunks, load_chunking_config
 from .data.filtering import (
     load_corpus_filter_config,
     prepare_corpus,
     write_corpus_artifacts,
 )
+from .models.classifier import train_single_classifier
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -72,6 +75,59 @@ def prepare_corpus_command(
         f"Wrote Phase 3 corpus to {output_path} "
         f"({len(result.admitted_records)} admitted, "
         f"{len(result.excluded_records)} excluded)"
+    )
+
+
+@app.command("chunk-corpus")
+def chunk_corpus_command(
+    corpus_path: Annotated[
+        Path,
+        typer.Option("--corpus", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+) -> None:
+    """Build Phase 4 chunk JSONL/Parquet artifacts from the admitted corpus."""
+
+    config = load_chunking_config(config_path)
+    result = build_chunks(corpus_path, config)
+    write_chunk_artifacts(result, output_path)
+    typer.echo(
+        f"Wrote Phase 4 chunks to {output_path} "
+        f"({len(result.chunks)} chunks, "
+        f"{result.manifest['violating_classifier_token_cap_count']} cap violations)"
+    )
+
+
+@app.command("train-classifier")
+def train_classifier_command(
+    mode: Annotated[str, typer.Option("--mode")],
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    max_sources_per_category: Annotated[
+        int,
+        typer.Option("--max-sources-per-category"),
+    ] = 12,
+) -> None:
+    """Train Phase 5 classifier artifacts."""
+
+    if mode != "single":
+        raise typer.BadParameter("Phase 5 currently supports --mode single only")
+    result = train_single_classifier(
+        chunks_path,
+        output_path,
+        max_sources_per_category=max_sources_per_category,
+    )
+    typer.echo(
+        f"Wrote Phase 5 single classifier smoke artifacts to {output_path} "
+        f"({result.manifest['training_chunk_count']} chunks, "
+        f"T={result.calibration['temperature']})"
     )
 
 
