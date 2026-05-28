@@ -17,6 +17,7 @@ from .data.filtering import (
     write_corpus_artifacts,
 )
 from .models.classifier import train_single_classifier
+from .models.crossfit import train_crossfit_classifier
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -114,21 +115,35 @@ def train_classifier_command(
         int,
         typer.Option("--max-sources-per-category"),
     ] = 12,
+    folds: Annotated[int, typer.Option("--folds")] = 5,
 ) -> None:
-    """Train Phase 5 classifier artifacts."""
+    """Train Phase 5/6 classifier artifacts."""
 
-    if mode != "single":
-        raise typer.BadParameter("Phase 5 currently supports --mode single only")
-    result = train_single_classifier(
-        chunks_path,
-        output_path,
-        max_sources_per_category=max_sources_per_category,
-    )
-    typer.echo(
-        f"Wrote Phase 5 single classifier smoke artifacts to {output_path} "
-        f"({result.manifest['training_chunk_count']} chunks, "
-        f"T={result.calibration['temperature']})"
-    )
+    if mode == "single":
+        result = train_single_classifier(
+            chunks_path,
+            output_path,
+            max_sources_per_category=max_sources_per_category,
+        )
+        typer.echo(
+            f"Wrote Phase 5 single classifier smoke artifacts to {output_path} "
+            f"({result.manifest['training_chunk_count']} chunks, "
+            f"T={result.calibration['temperature']})"
+        )
+        return
+    if mode == "crossfit":
+        result = train_crossfit_classifier(
+            chunks_path,
+            output_path,
+            fold_count=folds,
+        )
+        typer.echo(
+            f"Wrote Phase 6 crossfit classifier artifacts to {output_path} "
+            f"({result.manifest['prediction_chunk_count']} OOF predictions, "
+            f"{result.manifest['fold_count']} folds)"
+        )
+        return
+    raise typer.BadParameter("supported classifier modes: single, crossfit")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
