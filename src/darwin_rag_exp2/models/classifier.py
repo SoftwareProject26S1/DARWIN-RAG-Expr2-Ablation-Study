@@ -98,12 +98,16 @@ class _NaiveBayesTextClassifier:
 
         return [self._logits(text) for text in texts]
 
-    def to_model_reference(self) -> dict[str, object]:
+    def to_model_reference(
+        self,
+        *,
+        purpose: str = "Phase 5 single-mode plumbing smoke, not official results",
+    ) -> dict[str, object]:
         """Return lightweight model metadata without storing full training text."""
 
         return {
             "model_type": "multinomial_naive_bayes_smoke",
-            "purpose": "Phase 5 single-mode plumbing smoke, not official results",
+            "purpose": purpose,
             "labels": list(self.labels),
             "alpha": self.alpha,
             "vocabulary_size": len(self.vocabulary),
