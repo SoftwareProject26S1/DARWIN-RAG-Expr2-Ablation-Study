@@ -16,6 +16,9 @@ from .data.filtering import (
     prepare_corpus,
     write_corpus_artifacts,
 )
+from .indexing.artifacts import build_index_artifacts, load_indexing_config
+from .indexing.embeddings import HashEmbeddingModel, SentenceTransformerEmbeddingModel
+from .indexing.faiss_store import FaissIndexWriter
 from .models.classifier import train_single_classifier
 from .models.crossfit import train_crossfit_classifier
 
@@ -144,6 +147,60 @@ def train_classifier_command(
         )
         return
     raise typer.BadParameter("supported classifier modes: single, crossfit")
+
+
+@app.command("build-indexes")
+def build_indexes_command(
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ],
+    predictions_path: Annotated[
+        Path,
+        typer.Option("--predictions", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    ingest_threshold: Annotated[float, typer.Option("--ingest-threshold")] = 0.5,
+    embedding_backend: Annotated[
+        str,
+        typer.Option("--embedding-backend"),
+    ] = "sentence-transformers",
+    embedding_model_name: Annotated[
+        str | None,
+        typer.Option("--embedding-model"),
+    ] = None,
+) -> None:
+    """Build Phase 7 unified and category FAISS indexes."""
+
+    config = load_indexing_config(config_path)
+    model_name = embedding_model_name or config.embedding_model
+    if embedding_backend == "sentence-transformers":
+        embedding_model = SentenceTransformerEmbeddingModel(model_name)
+    elif embedding_backend == "hash":
+        embedding_model = HashEmbeddingModel()
+    else:
+        raise typer.BadParameter("supported embedding backends: sentence-transformers, hash")
+
+    result = build_index_artifacts(
+        chunks_path=chunks_path,
+        predictions_path=predictions_path,
+        output_dir=output_path,
+        embedding_model=embedding_model,
+        index_writer=FaissIndexWriter(),
+        ingest_threshold=ingest_threshold,
+        embedding_model_name=model_name,
+        normalize_embeddings=config.normalize_embeddings,
+        similarity_metric=config.similarity_metric,
+    )
+    typer.echo(
+        f"Wrote Phase 7 indexes to {output_path} "
+        f"({result.manifest['chunk_count']} chunks, "
+        f"{len(result.manifest['category_indexes'])} category indexes)"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

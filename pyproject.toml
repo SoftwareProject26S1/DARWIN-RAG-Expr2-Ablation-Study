@@ -25,6 +25,10 @@ classifier = [
 dev = [
     "pytest>=8.3",
 ]
+indexing = [
+    "faiss-cpu>=1.9",
+    "sentence-transformers>=3.2",
+]
 
 [build-system]
 requires = ["hatchling"]
