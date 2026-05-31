@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -130,6 +131,7 @@ def train_crossfit_classifier(
     _write_json(output_dir / "calibration_by_fold.json", {"folds": calibration_rows})
     _write_json(output_dir / "model_references.json", {"folds": model_references})
     _write_jsonl(output_dir / "out_of_fold_predictions.jsonl", prediction_rows)
+    _write_prediction_rows_parquet(output_dir / "predictions.parquet", prediction_rows)
     _write_json(output_dir / "category_stats.json", {"rows": category_stats})
     _write_category_stats_parquet(output_dir / "category_stats.parquet", category_stats)
 
@@ -152,6 +154,7 @@ def train_crossfit_classifier(
             "calibration_by_fold.json",
             "model_references.json",
             "out_of_fold_predictions.jsonl",
+            "predictions.parquet",
             "category_stats.json",
             "category_stats.parquet",
             "manifest.json",
@@ -211,3 +214,42 @@ def _write_category_stats_parquet(
         ]
     )
     pq.write_table(pa.Table.from_pylist(list(rows), schema=schema), path)
+
+
+def _write_prediction_rows_parquet(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    parquet_rows = []
+    for row in rows:
+        parquet_rows.append(
+            {
+                "chunk_id": str(row["chunk_id"]),
+                "source_id": str(row["source_id"]),
+                "category": str(row["category"]),
+                "predicted_category": str(row["predicted_category"]),
+                "confidence": float(row["confidence"]),
+                "fold_index": int(row["fold_index"]),
+                "probability_source": str(row["probability_source"]),
+                "temperature": float(row["temperature"]),
+                "probabilities_json": json.dumps(
+                    row["probabilities"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        )
+    schema = pa.schema(
+        [
+            pa.field("chunk_id", pa.string()),
+            pa.field("source_id", pa.string()),
+            pa.field("category", pa.string()),
+            pa.field("predicted_category", pa.string()),
+            pa.field("confidence", pa.float64()),
+            pa.field("fold_index", pa.int64()),
+            pa.field("probability_source", pa.string()),
+            pa.field("temperature", pa.float64()),
+            pa.field("probabilities_json", pa.string()),
+        ]
+    )
+    pq.write_table(pa.Table.from_pylist(parquet_rows, schema=schema), path)

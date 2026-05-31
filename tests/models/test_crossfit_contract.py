@@ -67,6 +67,7 @@ def test_train_classifier_crossfit_writes_out_of_fold_contract(tmp_path) -> None
     )
     assert all(row["lambda_c_not"] == "bert_confidence" for row in stats)
     assert (output_path / "category_stats.parquet").exists()
+    assert (output_path / "predictions.parquet").exists()
     assert (output_path / "calibration_by_fold.json").exists()
     assert (output_path / "model_references.json").exists()
 
