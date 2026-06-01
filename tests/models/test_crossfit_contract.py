@@ -74,6 +74,8 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
             "1",
             "--calibration-fraction",
             "0.5",
+            "--log-every-batches",
+            "9",
             "--device",
             "cpu",
         ]
@@ -88,6 +90,15 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
         assert f"[bert:crossfit fold {fold_number}/3] epoch 1/1 finished" in captured
         assert f"[train-classifier:crossfit] fold {fold_number}/3 finished" in captured
     assert len(calls) == 3
+    assert all(call["config"].log_every_batches == 9 for call in calls)
+    assert [
+        call["progress_label"]
+        for call in calls
+    ] == [
+        "crossfit fold 1/3",
+        "crossfit fold 2/3",
+        "crossfit fold 3/3",
+    ]
     manifest = json.loads((output_path / "manifest.json").read_text())
     folds = json.loads((output_path / "folds.json").read_text())["folds"]
     calibration_folds = json.loads((output_path / "calibration_by_fold.json").read_text())["folds"]

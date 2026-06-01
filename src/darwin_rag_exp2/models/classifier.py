@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 import random
+import time
 
 import orjson
 import pyarrow as pa
@@ -37,6 +38,7 @@ class TransformerTrainingConfig:
     calibration_fraction: float = 0.1
     seed: int = 42
     device: str = "auto"
+    log_every_batches: int = 25
 
     def __post_init__(self) -> None:
         if self.max_length <= 0:
@@ -55,6 +57,8 @@ class TransformerTrainingConfig:
             raise ValueError("warmup_ratio must be in [0, 1)")
         if not 0 <= self.calibration_fraction < 1:
             raise ValueError("calibration_fraction must be in [0, 1)")
+        if self.log_every_batches < 0:
+            raise ValueError("log_every_batches must be non-negative")
 
     def to_manifest(self) -> dict[str, object]:
         """Return JSON-serializable training settings."""
@@ -71,6 +75,7 @@ class TransformerTrainingConfig:
             "calibration_fraction": self.calibration_fraction,
             "seed": self.seed,
             "device": self.device,
+            "log_every_batches": self.log_every_batches,
         }
 
 
@@ -105,6 +110,36 @@ class _TransformerRunResult:
     calibration_logits: list[list[float]]
     calibration_label_ids: list[int]
     prediction_logits: list[list[float]]
+
+
+class _ClassifierDataset:
+    """Tokenized classifier rows with batch-level dynamic padding left to the collator."""
+
+    def __init__(
+        self,
+        *,
+        rows: Sequence[_TrainingRow],
+        tokenizer,
+        label_to_index: Mapping[str, int],
+        max_length: int,
+    ) -> None:
+        self.features = [
+            {
+                **tokenizer(
+                    row.classifier_text,
+                    truncation=True,
+                    max_length=max_length,
+                ),
+                "label": label_to_index[row.category],
+            }
+            for row in rows
+        ]
+
+    def __len__(self) -> int:
+        return len(self.features)
+
+    def __getitem__(self, index: int) -> dict[str, object]:
+        return dict(self.features[index])
 
 
 def train_single_classifier(
@@ -422,10 +457,11 @@ def _fit_predict_transformer_classifier(
     )
     try:
         import torch
-        from torch.utils.data import DataLoader, Dataset
+        from torch.utils.data import DataLoader
         from transformers import (
             AutoModelForSequenceClassification,
             AutoTokenizer,
+            DataCollatorWithPadding,
             get_linear_schedule_with_warmup,
         )
     except ImportError as exc:  # pragma: no cover - exercised by environment
@@ -456,38 +492,19 @@ def _fit_predict_transformer_classifier(
     device = _resolve_torch_device(torch, config.device)
     model.to(device)
 
-    class _ClassifierDataset(Dataset):
-        def __init__(self, rows: Sequence[_TrainingRow]) -> None:
-            self.encodings = tokenizer(
-                [row.classifier_text for row in rows],
-                truncation=True,
-                padding=True,
-                max_length=config.max_length,
-                return_tensors="pt",
-            )
-            self.labels = torch.tensor(
-                [label_to_index[row.category] for row in rows],
-                dtype=torch.long,
-            )
-
-        def __len__(self) -> int:
-            return len(self.labels)
-
-        def __getitem__(self, index: int) -> dict[str, object]:
-            item = {
-                key: value[index]
-                for key, value in self.encodings.items()
-            }
-            item["labels"] = self.labels[index]
-            return item
-
     generator = torch.Generator()
     generator.manual_seed(config.seed)
     training_loader = DataLoader(
-        _ClassifierDataset(training_rows),
+        _ClassifierDataset(
+            rows=training_rows,
+            tokenizer=tokenizer,
+            label_to_index=label_to_index,
+            max_length=config.max_length,
+        ),
         batch_size=config.train_batch_size,
         shuffle=True,
         generator=generator,
+        collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -506,26 +523,52 @@ def _fit_predict_transformer_classifier(
         progress_callback,
         (
             f"[bert:{progress_label}] training {len(training_rows)} chunks "
-            f"for {config.epochs} epoch(s)"
+            f"from {len(_source_ids(training_rows))} sources across {len(labels)} "
+            f"categories for {config.epochs} epoch(s); "
+            f"batch_size={config.train_batch_size}, total_batches={len(training_loader)}, "
+            f"total_steps={total_steps}, warmup_steps={warmup_steps}, device={device}"
         ),
     )
     model.train()
     for epoch_index in range(config.epochs):
         epoch_number = epoch_index + 1
+        epoch_started_at = time.monotonic()
+        processed_chunks = 0
         _emit_progress(
             progress_callback,
             f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} started",
         )
-        for batch in training_loader:
+        for batch_index, batch in enumerate(training_loader, start=1):
             optimizer.zero_grad(set_to_none=True)
             batch_on_device = {
                 key: value.to(device)
                 for key, value in batch.items()
             }
             outputs = model(**batch_on_device)
-            outputs.loss.backward()
+            loss = outputs.loss
+            loss.backward()
             optimizer.step()
             scheduler.step()
+            processed_chunks += int(batch_on_device["labels"].shape[0])
+            if _should_emit_batch_progress(
+                batch_index=batch_index,
+                total_batches=len(training_loader),
+                log_every_batches=config.log_every_batches,
+            ):
+                _emit_progress(
+                    progress_callback,
+                    _format_batch_progress(
+                        progress_label=progress_label,
+                        stage=f"train epoch {epoch_number}/{config.epochs}",
+                        batch_index=batch_index,
+                        total_batches=len(training_loader),
+                        processed_items=processed_chunks,
+                        total_items=len(training_rows),
+                        elapsed_seconds=time.monotonic() - epoch_started_at,
+                        latest_loss=float(loss.detach().cpu().item()),
+                        learning_rate=float(scheduler.get_last_lr()[0]),
+                    ),
+                )
         _emit_progress(
             progress_callback,
             f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} finished",
@@ -550,6 +593,9 @@ def _fit_predict_transformer_classifier(
         rows=calibration_rows,
         config=config,
         device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="calibration inference",
     )
     _emit_progress(
         progress_callback,
@@ -562,6 +608,9 @@ def _fit_predict_transformer_classifier(
         rows=prediction_rows,
         config=config,
         device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="prediction inference",
     )
     model_reference: dict[str, object] = {
         "model_type": TRANSFORMER_MODEL_TYPE,
@@ -596,6 +645,64 @@ def _emit_progress(
         progress_callback(message)
 
 
+def _should_emit_batch_progress(
+    *,
+    batch_index: int,
+    total_batches: int,
+    log_every_batches: int,
+) -> bool:
+    if log_every_batches <= 0:
+        return False
+    return batch_index == total_batches or batch_index % log_every_batches == 0
+
+
+def _format_batch_progress(
+    *,
+    progress_label: str,
+    stage: str,
+    batch_index: int,
+    total_batches: int,
+    processed_items: int,
+    total_items: int,
+    elapsed_seconds: float,
+    latest_loss: float | None = None,
+    learning_rate: float | None = None,
+) -> str:
+    progress_fraction = batch_index / max(total_batches, 1)
+    remaining_batches = max(total_batches - batch_index, 0)
+    seconds_per_batch = elapsed_seconds / max(batch_index, 1)
+    eta_seconds = seconds_per_batch * remaining_batches
+    throughput = processed_items / elapsed_seconds if elapsed_seconds > 0 else 0.0
+    parts = [
+        (
+            f"[bert:{progress_label}] {stage} batch {batch_index}/{total_batches} "
+            f"({progress_fraction * 100:.1f}%)"
+        ),
+        f"items={processed_items}/{total_items}",
+    ]
+    if latest_loss is not None:
+        parts.append(f"loss={latest_loss:.4f}")
+    if learning_rate is not None:
+        parts.append(f"lr={_format_learning_rate(learning_rate)}")
+    parts.extend(
+        [
+            f"elapsed={_format_duration(elapsed_seconds)}",
+            f"eta={_format_duration(eta_seconds)}",
+            f"chunks/s={throughput:.2f}",
+        ]
+    )
+    return " | ".join(parts)
+
+
+def _format_duration(seconds: float) -> str:
+    seconds_int = max(0, int(round(seconds)))
+    return f"{seconds_int}s"
+
+
+def _format_learning_rate(value: float) -> str:
+    return f"{value:.10f}".rstrip("0").rstrip(".")
+
+
 def _resolve_torch_device(torch, requested: str):
     if requested != "auto":
         return torch.device(requested)
@@ -614,11 +721,16 @@ def _predict_transformer_logits(
     rows: Sequence[_TrainingRow],
     config: TransformerTrainingConfig,
     device,
+    progress_callback: ProgressCallback | None = None,
+    progress_label: str = "classifier",
+    stage: str = "inference",
 ) -> list[list[float]]:
     logits: list[list[float]] = []
     model.eval()
+    total_batches = max(1, (len(rows) + config.eval_batch_size - 1) // config.eval_batch_size)
+    started_at = time.monotonic()
     with torch.no_grad():
-        for start in range(0, len(rows), config.eval_batch_size):
+        for batch_index, start in enumerate(range(0, len(rows), config.eval_batch_size), start=1):
             batch_rows = rows[start : start + config.eval_batch_size]
             encoded = tokenizer(
                 [row.classifier_text for row in batch_rows],
@@ -633,6 +745,23 @@ def _predict_transformer_logits(
             }
             output = model(**encoded)
             logits.extend(output.logits.detach().cpu().tolist())
+            if _should_emit_batch_progress(
+                batch_index=batch_index,
+                total_batches=total_batches,
+                log_every_batches=config.log_every_batches,
+            ):
+                _emit_progress(
+                    progress_callback,
+                    _format_batch_progress(
+                        progress_label=progress_label,
+                        stage=stage,
+                        batch_index=batch_index,
+                        total_batches=total_batches,
+                        processed_items=len(logits),
+                        total_items=len(rows),
+                        elapsed_seconds=time.monotonic() - started_at,
+                    ),
+                )
     return logits
 
 

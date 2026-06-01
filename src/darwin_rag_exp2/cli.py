@@ -145,6 +145,7 @@ def train_classifier_command(
     ] = 0.1,
     seed: Annotated[int, typer.Option("--seed")] = 42,
     device: Annotated[str, typer.Option("--device")] = "auto",
+    log_every_batches: Annotated[int, typer.Option("--log-every-batches")] = 25,
 ) -> None:
     """Train Phase 5/6 classifier artifacts."""
 
@@ -162,6 +163,7 @@ def train_classifier_command(
         calibration_fraction=calibration_fraction,
         seed=seed,
         device=device,
+        log_every_batches=log_every_batches,
     )
 
     if mode == "single":

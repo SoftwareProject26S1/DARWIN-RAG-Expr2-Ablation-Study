@@ -6,6 +6,12 @@ import pyarrow.parquet as pq
 
 from darwin_rag_exp2.cli import main
 import darwin_rag_exp2.models.classifier as classifier_module
+from darwin_rag_exp2.models.classifier import (
+    TransformerTrainingConfig,
+    _ClassifierDataset,
+    _TrainingRow,
+    _format_batch_progress,
+)
 
 
 def test_train_classifier_single_writes_bert_smoke_artifacts(
@@ -76,6 +82,7 @@ def test_train_classifier_single_writes_bert_smoke_artifacts(
     assert result == 0
     captured = capsys.readouterr().out
     assert calls
+    assert calls[0]["config"].log_every_batches == 25
     assert "[train-classifier:single] preparing BERT fine-tuning" in captured
     assert "[bert:single] epoch 1/1 started" in captured
     assert "[bert:single] epoch 1/1 finished" in captured
@@ -107,8 +114,10 @@ def test_train_classifier_final_writes_full_corpus_query_model(
         chunk_row("s2", "장학", "국가 장학 선발 결과 공지"),
     ]
     pq.write_table(pa.Table.from_pylist(rows), chunks_path)
+    calls = []
 
     def fake_fit_predict_transformer_classifier(**kwargs):
+        calls.append(kwargs)
         progress = kwargs.get("progress_callback")
         if progress is not None:
             progress(f"[bert:{kwargs['progress_label']}] epoch 1/1 started")
@@ -153,6 +162,8 @@ def test_train_classifier_final_writes_full_corpus_query_model(
             "1",
             "--calibration-fraction",
             "0.5",
+            "--log-every-batches",
+            "7",
             "--device",
             "cpu",
         ]
@@ -160,6 +171,8 @@ def test_train_classifier_final_writes_full_corpus_query_model(
 
     assert result == 0
     captured = capsys.readouterr().out
+    assert calls
+    assert calls[0]["config"].log_every_batches == 7
     assert "[train-classifier:final] preparing full-corpus BERT fine-tuning" in captured
     assert "[bert:final] epoch 1/1 started" in captured
     assert "[bert:final] epoch 1/1 finished" in captured
@@ -171,6 +184,59 @@ def test_train_classifier_final_writes_full_corpus_query_model(
     assert (output_path / "model_reference.json").exists()
     assert (output_path / "calibration.json").exists()
     assert (output_path / "calibration_predictions.jsonl").exists()
+
+
+def test_batch_progress_message_reports_status_metrics() -> None:
+    message = _format_batch_progress(
+        progress_label="single",
+        stage="train epoch 1/3",
+        batch_index=25,
+        total_batches=100,
+        processed_items=800,
+        total_items=3200,
+        elapsed_seconds=50.0,
+        latest_loss=0.4321,
+        learning_rate=0.0000123,
+    )
+
+    assert message.startswith("[bert:single] train epoch 1/3 batch 25/100")
+    assert "25.0%" in message
+    assert "loss=0.4321" in message
+    assert "lr=0.0000123" in message
+    assert "elapsed=50s" in message
+    assert "eta=150s" in message
+    assert "chunks/s=16.00" in message
+
+
+def test_classifier_dataset_tokenizes_without_global_padding() -> None:
+    tokenizer = RecordingTokenizer()
+    rows = [
+        _TrainingRow(
+            chunk_id="a::0000",
+            source_id="a",
+            category="학사",
+            classifier_text="짧은 공지",
+        )
+    ]
+
+    dataset = _ClassifierDataset(
+        rows=rows,
+        tokenizer=tokenizer,
+        label_to_index={"학사": 0},
+        max_length=512,
+    )
+
+    item = dataset[0]
+
+    assert len(dataset) == 1
+    assert item["label"] == 0
+    assert tokenizer.calls == [
+        {
+            "text": "짧은 공지",
+            "truncation": True,
+            "max_length": 512,
+        }
+    ]
 
 
 def chunk_row(source_id: str, category: str, classifier_text: str) -> dict[str, object]:
@@ -199,3 +265,15 @@ def logits_for_rows(rows, labels: tuple[str, ...]) -> list[list[float]]:
     for row in rows:
         logits.append([4.0 if label == row.category else -1.0 for label in labels])
     return logits
+
+
+class RecordingTokenizer:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, text, **kwargs):
+        self.calls.append({"text": text, **kwargs})
+        return {
+            "input_ids": [1, 2, 3],
+            "attention_mask": [1, 1, 1],
+        }
