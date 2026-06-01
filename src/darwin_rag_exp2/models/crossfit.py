@@ -17,6 +17,7 @@ from .classifier import (
     TRANSFORMER_MODEL_TYPE,
     TransformerTrainingConfig,
     _TrainingRow,
+    _checkpoint_fingerprint,
     _emit_progress,
     _file_sha256,
     _fit_predict_transformer_classifier,
@@ -35,6 +36,9 @@ OOF_PROBABILITY_SOURCE = "out_of_fold"
 MANIFEST_PROBABILITY_SOURCE = "out_of_fold_calibrated_probabilities"
 LAMBDA_C_INTERPRETATION = "semantic_similarity_mixture_coefficient"
 LAMBDA_C_NOT = "bert_confidence"
+FOLD_CLASSIFIER_PURPOSE = (
+    "Phase 6 fold-local BERT classifier for out-of-fold probability artifacts"
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,7 @@ def train_crossfit_classifier(
     fold_count: int,
     training_config: TransformerTrainingConfig | None = None,
     progress_callback: ProgressCallback | None = None,
+    resume: bool = False,
 ) -> CrossfitClassifierResult:
     """Train fold-local BERT classifiers and write out-of-fold predictions."""
 
@@ -85,6 +90,32 @@ def train_crossfit_classifier(
             calibration_fraction=config.calibration_fraction,
             seed=config.seed + fold.fold_index,
         )
+        fold_fingerprint = _checkpoint_fingerprint(
+            training_rows=fit_rows,
+            calibration_rows=calibration_subset_rows,
+            prediction_rows=validation_rows,
+            categories=categories,
+            config=config,
+            purpose=FOLD_CLASSIFIER_PURPOSE,
+        )
+        if resume:
+            partial_payload = _load_fold_partial(
+                output_dir,
+                fold_index=fold.fold_index,
+                expected_fingerprint=fold_fingerprint,
+            )
+            if partial_payload is not None:
+                prediction_rows.extend(partial_payload["predictions"])
+                calibration_report_rows.append(partial_payload["calibration_report"])
+                model_references.append(partial_payload["model_reference"])
+                _emit_progress(
+                    progress_callback,
+                    (
+                        f"[train-classifier:crossfit] fold {fold_number}/{fold_total} "
+                        "resumed from partial artifact"
+                    ),
+                )
+                continue
         run = _fit_predict_transformer_classifier(
             training_rows=fit_rows,
             calibration_rows=calibration_subset_rows,
@@ -92,12 +123,10 @@ def train_crossfit_classifier(
             categories=categories,
             model_output_dir=output_dir / "models" / f"fold_{fold.fold_index:03d}",
             config=config,
-            purpose=(
-                "Phase 6 fold-local BERT classifier for out-of-fold "
-                "probability artifacts"
-            ),
+            purpose=FOLD_CLASSIFIER_PURPOSE,
             progress_callback=progress_callback,
             progress_label=f"crossfit fold {fold_number}/{fold_total}",
+            resume=resume,
         )
         if tuple(run.labels) != categories:
             raise ValueError(
@@ -118,25 +147,34 @@ def train_crossfit_classifier(
             prediction["temperature"] = _metric(calibration.temperature)
         prediction_rows.extend(fold_predictions)
 
-        calibration_report_rows.append(
-            {
-                "fold_index": fold.fold_index,
-                "fit_source_count": len(_source_ids(fit_rows)),
-                "calibration_source_count": len(_source_ids(calibration_subset_rows)),
-                "validation_source_count": len(fold.validation_source_ids),
-                "fit_source_ids": _source_ids(fit_rows),
-                "calibration_source_ids": _source_ids(calibration_subset_rows),
-                **calibration.to_dict(),
-            }
-        )
-        model_references.append(
-            {
-                "fold_index": fold.fold_index,
-                "fit_source_count": len(_source_ids(fit_rows)),
-                "calibration_source_count": len(_source_ids(calibration_subset_rows)),
-                "validation_source_count": len(fold.validation_source_ids),
-                **run.model_reference,
-            }
+        calibration_report = {
+            "fold_index": fold.fold_index,
+            "fit_source_count": len(_source_ids(fit_rows)),
+            "calibration_source_count": len(_source_ids(calibration_subset_rows)),
+            "validation_source_count": len(fold.validation_source_ids),
+            "fit_source_ids": _source_ids(fit_rows),
+            "calibration_source_ids": _source_ids(calibration_subset_rows),
+            **calibration.to_dict(),
+        }
+        model_reference = {
+            "fold_index": fold.fold_index,
+            "fit_source_count": len(_source_ids(fit_rows)),
+            "calibration_source_count": len(_source_ids(calibration_subset_rows)),
+            "validation_source_count": len(fold.validation_source_ids),
+            **run.model_reference,
+        }
+        calibration_report_rows.append(calibration_report)
+        model_references.append(model_reference)
+        _write_fold_partial(
+            output_dir,
+            fold_index=fold.fold_index,
+            payload={
+                "schema_version": 1,
+                "fingerprint": fold_fingerprint,
+                "calibration_report": calibration_report,
+                "model_reference": model_reference,
+                "predictions": fold_predictions,
+            },
         )
         _emit_progress(
             progress_callback,
@@ -229,6 +267,38 @@ def _fold_to_dict(fold: SourceFold) -> dict[str, object]:
         "training_source_ids": list(fold.training_source_ids),
         "validation_source_ids": list(fold.validation_source_ids),
     }
+
+
+def _fold_partial_path(output_dir: Path, fold_index: int) -> Path:
+    return output_dir / "partial" / f"fold_{fold_index:03d}.json"
+
+
+def _write_fold_partial(
+    output_dir: Path,
+    *,
+    fold_index: int,
+    payload: Mapping[str, object],
+) -> None:
+    path = _fold_partial_path(output_dir, fold_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, payload)
+
+
+def _load_fold_partial(
+    output_dir: Path,
+    *,
+    fold_index: int,
+    expected_fingerprint: str,
+) -> dict[str, object] | None:
+    path = _fold_partial_path(output_dir, fold_index)
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    if payload.get("schema_version") != 1:
+        raise ValueError(f"incompatible partial fold schema at {path}")
+    if payload.get("fingerprint") != expected_fingerprint:
+        raise ValueError(f"incompatible partial fold artifact at {path}")
+    return payload
 
 
 def _write_category_stats_parquet(

@@ -6,6 +6,13 @@ import pyarrow.parquet as pq
 
 from darwin_rag_exp2.cli import main
 import darwin_rag_exp2.models.crossfit as crossfit_module
+from darwin_rag_exp2.models.classifier import (
+    TransformerTrainingConfig,
+    _checkpoint_fingerprint,
+    _read_training_rows,
+    _split_fit_calibration_rows,
+)
+from darwin_rag_exp2.models.splits import build_source_folds
 
 
 def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
@@ -76,6 +83,7 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
             "0.5",
             "--log-every-batches",
             "9",
+            "--resume",
             "--device",
             "cpu",
         ]
@@ -91,6 +99,7 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
         assert f"[train-classifier:crossfit] fold {fold_number}/3 finished" in captured
     assert len(calls) == 3
     assert all(call["config"].log_every_batches == 9 for call in calls)
+    assert all(call["resume"] is True for call in calls)
     assert [
         call["progress_label"]
         for call in calls
@@ -154,6 +163,146 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
     assert (output_path / "model_references.json").exists()
 
 
+def test_train_classifier_crossfit_resume_reuses_completed_partial_fold(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    chunks_path = tmp_path / "chunks.parquet"
+    output_path = tmp_path / "classifier" / "crossfit"
+    rows = [
+        chunk_row("a1", "학사", "수강 신청 변경 기간 학사 공지"),
+        chunk_row("a2", "학사", "강의 시간표와 학사 일정 안내"),
+        chunk_row("s1", "장학", "국가 장학금 신청 서류 안내"),
+        chunk_row("s2", "장학", "성적 장학 선발 결과 공지"),
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), chunks_path)
+    config = TransformerTrainingConfig(
+        model_name="test-bert",
+        epochs=1,
+        calibration_fraction=0.5,
+        device="cpu",
+    )
+    training_rows = _read_training_rows(chunks_path)
+    folds = build_source_folds(
+        [
+            {"source_id": row.source_id, "category": row.category}
+            for row in training_rows
+        ],
+        fold_count=2,
+    )
+    categories = tuple(sorted({row.category for row in training_rows}))
+    first_fold = folds[0]
+    fold_training_rows, validation_rows = crossfit_module._rows_for_fold(
+        training_rows,
+        first_fold,
+    )
+    fit_rows, calibration_rows = _split_fit_calibration_rows(
+        fold_training_rows,
+        calibration_fraction=config.calibration_fraction,
+        seed=config.seed + first_fold.fold_index,
+    )
+    fingerprint = _checkpoint_fingerprint(
+        training_rows=fit_rows,
+        calibration_rows=calibration_rows,
+        prediction_rows=validation_rows,
+        categories=categories,
+        config=config,
+        purpose=crossfit_module.FOLD_CLASSIFIER_PURPOSE,
+    )
+    partial_predictions = prediction_dicts(validation_rows, categories, fold_index=0)
+    crossfit_module._write_fold_partial(
+        output_path,
+        fold_index=0,
+        payload={
+            "schema_version": 1,
+            "fingerprint": fingerprint,
+            "calibration_report": {
+                "fold_index": 0,
+                "fit_source_count": len({row.source_id for row in fit_rows}),
+                "calibration_source_count": len({row.source_id for row in calibration_rows}),
+                "validation_source_count": len(first_fold.validation_source_ids),
+                "fit_source_ids": sorted({row.source_id for row in fit_rows}),
+                "calibration_source_ids": sorted({row.source_id for row in calibration_rows}),
+                "temperature": 1.0,
+                "ece_before": 0.0,
+                "ece_after": 0.0,
+            },
+            "model_reference": {
+                "fold_index": 0,
+                "fit_source_count": len({row.source_id for row in fit_rows}),
+                "calibration_source_count": len({row.source_id for row in calibration_rows}),
+                "validation_source_count": len(first_fold.validation_source_ids),
+                "model_type": "transformer_sequence_classification",
+                "base_model": "test-bert",
+            },
+            "predictions": partial_predictions,
+        },
+    )
+    calls = []
+
+    def fake_fit_predict_transformer_classifier(**kwargs):
+        calls.append(kwargs)
+        labels = tuple(kwargs["categories"])
+        prediction_rows = kwargs["prediction_rows"]
+        calibration_rows = kwargs["calibration_rows"]
+        return SimpleNamespace(
+            labels=labels,
+            model_reference={
+                "model_type": "transformer_sequence_classification",
+                "base_model": kwargs["config"].model_name,
+                "labels": list(labels),
+                "label2id": {label: index for index, label in enumerate(labels)},
+                "id2label": {str(index): label for index, label in enumerate(labels)},
+                "purpose": kwargs["purpose"],
+            },
+            calibration_logits=logits_for_rows(calibration_rows, labels),
+            calibration_label_ids=[labels.index(row.category) for row in calibration_rows],
+            prediction_logits=logits_for_rows(prediction_rows, labels),
+        )
+
+    monkeypatch.setattr(
+        crossfit_module,
+        "_fit_predict_transformer_classifier",
+        fake_fit_predict_transformer_classifier,
+        raising=False,
+    )
+
+    result = main(
+        [
+            "train-classifier",
+            "--mode",
+            "crossfit",
+            "--chunks",
+            str(chunks_path),
+            "--folds",
+            "2",
+            "--output",
+            str(output_path),
+            "--model",
+            "test-bert",
+            "--epochs",
+            "1",
+            "--calibration-fraction",
+            "0.5",
+            "--resume",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert result == 0
+    captured = capsys.readouterr().out
+    assert "[train-classifier:crossfit] fold 1/2 resumed from partial artifact" in captured
+    assert len(calls) == 1
+    assert calls[0]["progress_label"] == "crossfit fold 2/2"
+    predictions = [
+        json.loads(line)
+        for line in (output_path / "out_of_fold_predictions.jsonl").read_text().splitlines()
+    ]
+    assert len(predictions) == len(rows)
+
+
 def chunk_row(source_id: str, category: str, classifier_text: str) -> dict[str, object]:
     return {
         "chunk_id": f"{source_id}::0000",
@@ -180,3 +329,27 @@ def logits_for_rows(rows, labels: tuple[str, ...]) -> list[list[float]]:
     for row in rows:
         logits.append([4.0 if label == row.category else -1.0 for label in labels])
     return logits
+
+
+def prediction_dicts(rows, labels: tuple[str, ...], *, fold_index: int) -> list[dict[str, object]]:
+    predictions = []
+    for row in rows:
+        probabilities = {
+            label: (1.0 if label == row.category else 0.0)
+            for label in labels
+        }
+        predictions.append(
+            {
+                "chunk_id": row.chunk_id,
+                "source_id": row.source_id,
+                "category": row.category,
+                "predicted_category": row.category,
+                "confidence": 1.0,
+                "probabilities": probabilities,
+                "logits": [1.0 if label == row.category else 0.0 for label in labels],
+                "fold_index": fold_index,
+                "probability_source": "out_of_fold",
+                "temperature": 1.0,
+            }
+        )
+    return predictions

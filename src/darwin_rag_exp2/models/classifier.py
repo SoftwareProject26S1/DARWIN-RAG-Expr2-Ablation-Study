@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 import random
+import shutil
 import time
 
 import orjson
@@ -20,6 +21,7 @@ from .category_stats import build_category_stats
 
 TRANSFORMER_MODEL_TYPE = "transformer_sequence_classification"
 FINAL_PROBABILITY_SOURCE = "full_corpus_calibrated_query_classifier"
+CHECKPOINT_SCHEMA_VERSION = 1
 ProgressCallback = Callable[[str], None]
 
 
@@ -150,6 +152,7 @@ def train_single_classifier(
     max_chunks_per_category: int = 80,
     training_config: TransformerTrainingConfig | None = None,
     progress_callback: ProgressCallback | None = None,
+    resume: bool = False,
 ) -> SingleClassifierResult:
     """Train the Phase 5 BERT single-model smoke pipeline."""
 
@@ -179,6 +182,7 @@ def train_single_classifier(
         purpose="Phase 5 single-mode BERT fine-tuning smoke",
         progress_callback=progress_callback,
         progress_label="single",
+        resume=resume,
     )
     calibration = calibrate_logits(run.calibration_logits, run.calibration_label_ids)
     probabilities = softmax(run.prediction_logits, calibration.temperature)
@@ -239,6 +243,7 @@ def train_final_classifier(
     *,
     training_config: TransformerTrainingConfig | None = None,
     progress_callback: ProgressCallback | None = None,
+    resume: bool = False,
 ) -> FinalClassifierResult:
     """Train the full-corpus calibrated BERT classifier for query-time routing."""
 
@@ -264,6 +269,7 @@ def train_final_classifier(
         purpose="Final full-corpus BERT classifier for query-time routing",
         progress_callback=progress_callback,
         progress_label="final",
+        resume=resume,
     )
     calibration = calibrate_logits(run.calibration_logits, run.calibration_label_ids)
     probabilities = softmax(run.prediction_logits, calibration.temperature)
@@ -430,6 +436,149 @@ def _label_ids(rows: Sequence[_TrainingRow], labels: Sequence[str]) -> list[int]
     return [label_to_index[row.category] for row in rows]
 
 
+def _checkpoint_fingerprint(
+    *,
+    training_rows: Sequence[_TrainingRow],
+    calibration_rows: Sequence[_TrainingRow],
+    prediction_rows: Sequence[_TrainingRow],
+    categories: Sequence[str],
+    config: TransformerTrainingConfig,
+    purpose: str,
+) -> str:
+    payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "purpose": purpose,
+        "categories": list(categories),
+        "training_rows": _fingerprint_rows(training_rows),
+        "calibration_rows": _fingerprint_rows(calibration_rows),
+        "prediction_rows": _fingerprint_rows(prediction_rows),
+        "training_hyperparameters": config.to_manifest(),
+    }
+    return sha256(
+        orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
+    ).hexdigest()
+
+
+def _fingerprint_rows(rows: Sequence[_TrainingRow]) -> list[dict[str, str]]:
+    return [
+        {
+            "chunk_id": row.chunk_id,
+            "source_id": row.source_id,
+            "category": row.category,
+        }
+        for row in rows
+    ]
+
+
+def _latest_checkpoint_dir(model_output_dir: Path) -> Path:
+    return model_output_dir / "checkpoints" / "latest"
+
+
+def _load_latest_checkpoint_metadata(
+    model_output_dir: Path,
+    *,
+    expected_fingerprint: str,
+) -> dict[str, object] | None:
+    checkpoint_dir = _latest_checkpoint_dir(model_output_dir)
+    metadata_path = checkpoint_dir / "checkpoint.json"
+    if not checkpoint_dir.exists():
+        return None
+    if not metadata_path.exists():
+        raise ValueError(f"checkpoint at {checkpoint_dir} is missing checkpoint.json")
+    metadata = orjson.loads(metadata_path.read_bytes())
+    if metadata.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(f"incompatible checkpoint schema at {metadata_path}")
+    if metadata.get("fingerprint") != expected_fingerprint:
+        raise ValueError(f"incompatible checkpoint at {checkpoint_dir}")
+    return metadata
+
+
+def _load_latest_checkpoint_training_state(
+    *,
+    torch,
+    model_output_dir: Path,
+) -> Mapping[str, object]:
+    state_path = _latest_checkpoint_dir(model_output_dir) / "training_state.pt"
+    if not state_path.exists():
+        raise ValueError(f"checkpoint at {_latest_checkpoint_dir(model_output_dir)} is missing training_state.pt")
+    try:
+        return torch.load(state_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(state_path, map_location="cpu")
+
+
+def _write_latest_checkpoint(
+    *,
+    torch,
+    model,
+    tokenizer,
+    optimizer,
+    scheduler,
+    generator,
+    model_output_dir: Path,
+    fingerprint: str,
+    config: TransformerTrainingConfig,
+    labels: Sequence[str],
+    completed_epochs: int,
+    global_step: int,
+) -> None:
+    checkpoint_dir = _latest_checkpoint_dir(model_output_dir)
+    tmp_dir = checkpoint_dir.with_name("latest.tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(tmp_dir)
+    tokenizer.save_pretrained(tmp_dir)
+    torch.save(
+        {
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "dataloader_generator_state": generator.get_state(),
+            "python_random_state": random.getstate(),
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state_all": (
+                torch.cuda.get_rng_state_all()
+                if getattr(torch, "cuda", None) is not None and torch.cuda.is_available()
+                else None
+            ),
+            "completed_epochs": completed_epochs,
+            "global_step": global_step,
+        },
+        tmp_dir / "training_state.pt",
+    )
+    _write_json(
+        tmp_dir / "checkpoint.json",
+        {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "base_model": config.model_name,
+            "labels": list(labels),
+            "completed_epochs": completed_epochs,
+            "total_epochs": config.epochs,
+            "global_step": global_step,
+            "training_hyperparameters": config.to_manifest(),
+        },
+    )
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    tmp_dir.rename(checkpoint_dir)
+
+
+def _epoch_indexes_to_run(
+    *,
+    total_epochs: int,
+    completed_epochs: int,
+) -> range:
+    return range(completed_epochs, total_epochs)
+
+
+def _move_optimizer_state_to_device(optimizer, device) -> None:
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if hasattr(value, "to"):
+                state[key] = value.to(device)
+
+
 def _fit_predict_transformer_classifier(
     *,
     training_rows: Sequence[_TrainingRow],
@@ -441,6 +590,7 @@ def _fit_predict_transformer_classifier(
     purpose: str,
     progress_callback: ProgressCallback | None = None,
     progress_label: str = "classifier",
+    resume: bool = False,
 ) -> _TransformerRunResult:
     """Fine-tune a Hugging Face sequence classifier and return raw logits."""
 
@@ -478,13 +628,39 @@ def _fit_predict_transformer_classifier(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(config.seed)
 
+    checkpoint_fingerprint = _checkpoint_fingerprint(
+        training_rows=training_rows,
+        calibration_rows=calibration_rows,
+        prediction_rows=prediction_rows,
+        categories=labels,
+        config=config,
+        purpose=purpose,
+    )
+    checkpoint_metadata = (
+        _load_latest_checkpoint_metadata(
+            model_output_dir,
+            expected_fingerprint=checkpoint_fingerprint,
+        )
+        if resume
+        else None
+    )
+    checkpoint_dir = _latest_checkpoint_dir(model_output_dir)
+    model_load_path = checkpoint_dir if checkpoint_metadata is not None else config.model_name
+    if checkpoint_metadata is not None:
+        _emit_progress(
+            progress_callback,
+            (
+                f"[bert:{progress_label}] resuming from checkpoint "
+                f"{checkpoint_dir} after epoch {checkpoint_metadata['completed_epochs']}"
+            ),
+        )
     _emit_progress(
         progress_callback,
-        f"[bert:{progress_label}] loading tokenizer/model {config.model_name}",
+        f"[bert:{progress_label}] loading tokenizer/model {model_load_path}",
     )
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_load_path)
     model = AutoModelForSequenceClassification.from_pretrained(
-        config.model_name,
+        model_load_path,
         num_labels=len(labels),
         label2id=label_to_index,
         id2label=id_to_label,
@@ -518,6 +694,26 @@ def _fit_predict_transformer_classifier(
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
     )
+    completed_epochs = 0
+    global_step = 0
+    if checkpoint_metadata is not None:
+        training_state = _load_latest_checkpoint_training_state(
+            torch=torch,
+            model_output_dir=model_output_dir,
+        )
+        optimizer.load_state_dict(training_state["optimizer_state"])
+        scheduler.load_state_dict(training_state["scheduler_state"])
+        _move_optimizer_state_to_device(optimizer, device)
+        if "dataloader_generator_state" in training_state:
+            generator.set_state(training_state["dataloader_generator_state"])
+        if "python_random_state" in training_state:
+            random.setstate(training_state["python_random_state"])
+        if "torch_rng_state" in training_state:
+            torch.set_rng_state(training_state["torch_rng_state"])
+        if torch.cuda.is_available() and training_state.get("cuda_rng_state_all") is not None:
+            torch.cuda.set_rng_state_all(training_state["cuda_rng_state_all"])
+        completed_epochs = int(training_state.get("completed_epochs", 0))
+        global_step = int(training_state.get("global_step", 0))
 
     _emit_progress(
         progress_callback,
@@ -530,7 +726,19 @@ def _fit_predict_transformer_classifier(
         ),
     )
     model.train()
-    for epoch_index in range(config.epochs):
+    epoch_indexes = _epoch_indexes_to_run(
+        total_epochs=config.epochs,
+        completed_epochs=completed_epochs,
+    )
+    if not epoch_indexes:
+        _emit_progress(
+            progress_callback,
+            (
+                f"[bert:{progress_label}] checkpoint already completed "
+                f"{completed_epochs}/{config.epochs} epoch(s); skipping training"
+            ),
+        )
+    for epoch_index in epoch_indexes:
         epoch_number = epoch_index + 1
         epoch_started_at = time.monotonic()
         processed_chunks = 0
@@ -549,6 +757,7 @@ def _fit_predict_transformer_classifier(
             loss.backward()
             optimizer.step()
             scheduler.step()
+            global_step += 1
             processed_chunks += int(batch_on_device["labels"].shape[0])
             if _should_emit_batch_progress(
                 batch_index=batch_index,
@@ -572,6 +781,20 @@ def _fit_predict_transformer_classifier(
         _emit_progress(
             progress_callback,
             f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} finished",
+        )
+        _write_latest_checkpoint(
+            torch=torch,
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            generator=generator,
+            model_output_dir=model_output_dir,
+            fingerprint=checkpoint_fingerprint,
+            config=config,
+            labels=labels,
+            completed_epochs=epoch_number,
+            global_step=global_step,
         )
 
     _emit_progress(

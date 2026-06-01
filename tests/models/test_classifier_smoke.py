@@ -74,6 +74,7 @@ def test_train_classifier_single_writes_bert_smoke_artifacts(
             "test-bert",
             "--epochs",
             "1",
+            "--resume",
             "--device",
             "cpu",
         ]
@@ -83,6 +84,7 @@ def test_train_classifier_single_writes_bert_smoke_artifacts(
     captured = capsys.readouterr().out
     assert calls
     assert calls[0]["config"].log_every_batches == 25
+    assert calls[0]["resume"] is True
     assert "[train-classifier:single] preparing BERT fine-tuning" in captured
     assert "[bert:single] epoch 1/1 started" in captured
     assert "[bert:single] epoch 1/1 finished" in captured
@@ -164,6 +166,7 @@ def test_train_classifier_final_writes_full_corpus_query_model(
             "0.5",
             "--log-every-batches",
             "7",
+            "--resume",
             "--device",
             "cpu",
         ]
@@ -173,6 +176,7 @@ def test_train_classifier_final_writes_full_corpus_query_model(
     captured = capsys.readouterr().out
     assert calls
     assert calls[0]["config"].log_every_batches == 7
+    assert calls[0]["resume"] is True
     assert "[train-classifier:final] preparing full-corpus BERT fine-tuning" in captured
     assert "[bert:final] epoch 1/1 started" in captured
     assert "[bert:final] epoch 1/1 finished" in captured

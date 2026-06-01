@@ -146,6 +146,7 @@ def train_classifier_command(
     seed: Annotated[int, typer.Option("--seed")] = 42,
     device: Annotated[str, typer.Option("--device")] = "auto",
     log_every_batches: Annotated[int, typer.Option("--log-every-batches")] = 25,
+    resume: Annotated[bool, typer.Option("--resume")] = False,
 ) -> None:
     """Train Phase 5/6 classifier artifacts."""
 
@@ -173,6 +174,7 @@ def train_classifier_command(
             max_sources_per_category=max_sources_per_category,
             training_config=training_config,
             progress_callback=typer.echo,
+            resume=resume,
         )
         typer.echo(
             f"Wrote Phase 5 BERT single classifier smoke artifacts to {output_path} "
@@ -187,6 +189,7 @@ def train_classifier_command(
             fold_count=folds,
             training_config=training_config,
             progress_callback=typer.echo,
+            resume=resume,
         )
         typer.echo(
             f"Wrote Phase 6 BERT crossfit classifier artifacts to {output_path} "
@@ -200,6 +203,7 @@ def train_classifier_command(
             output_path,
             training_config=training_config,
             progress_callback=typer.echo,
+            resume=resume,
         )
         typer.echo(
             f"Wrote final BERT query classifier artifacts to {output_path} "
