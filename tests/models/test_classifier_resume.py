@@ -2,14 +2,18 @@ import json
 
 import pytest
 
+import darwin_rag_exp2.models.classifier as classifier_module
 from darwin_rag_exp2.models.classifier import (
     TransformerTrainingConfig,
     _TrainingRow,
     _checkpoint_fingerprint,
     _checkpoint_saved_message,
+    _checkpoint_training_completed,
     _epoch_indexes_to_run,
+    _format_mps_memory_report,
     _latest_checkpoint_dir,
     _load_latest_checkpoint_metadata,
+    _release_training_memory_for_inference,
     _resolve_torch_device,
     _write_latest_checkpoint,
 )
@@ -118,6 +122,82 @@ def test_explicit_device_resolution_uses_requested_device() -> None:
     ) == "cpu"
 
 
+def test_training_memory_cleanup_releases_optimizer_and_mps_cache(monkeypatch) -> None:
+    torch = FakeMpsMemoryTorch()
+    optimizer = FakeOptimizer()
+    collect_calls = []
+    messages: list[str] = []
+    monkeypatch.setattr(
+        classifier_module.gc,
+        "collect",
+        lambda: collect_calls.append("collect"),
+    )
+
+    _release_training_memory_for_inference(
+        torch=torch,
+        device="mps",
+        optimizer=optimizer,
+        progress_callback=messages.append,
+        progress_label="crossfit fold 1/5",
+    )
+
+    assert optimizer.zero_grad_calls == [True]
+    assert collect_calls == ["collect"]
+    assert torch.mps.calls == ["synchronize", "empty_cache"]
+    assert messages == [
+        "[bert:crossfit fold 1/5] releasing training memory before inference",
+        "[bert:crossfit fold 1/5] MPS memory before cleanup: "
+        "current=1.00 GiB, driver=3.00 GiB, recommended=4.00 GiB",
+        "[bert:crossfit fold 1/5] MPS memory after cleanup: "
+        "current=1.00 GiB, driver=2.00 GiB, recommended=4.00 GiB",
+    ]
+
+
+def test_training_memory_cleanup_skips_mps_cache_for_non_mps_device(monkeypatch) -> None:
+    torch = FakeMpsMemoryTorch()
+    optimizer = FakeOptimizer()
+    collect_calls = []
+    monkeypatch.setattr(
+        classifier_module.gc,
+        "collect",
+        lambda: collect_calls.append("collect"),
+    )
+
+    _release_training_memory_for_inference(
+        torch=torch,
+        device="cpu",
+        optimizer=optimizer,
+        progress_callback=None,
+        progress_label="classifier",
+    )
+
+    assert optimizer.zero_grad_calls == [True]
+    assert collect_calls == ["collect"]
+    assert torch.mps.calls == []
+
+
+def test_checkpoint_training_completed_matches_completed_epoch_count() -> None:
+    config = TransformerTrainingConfig(model_name="test-bert", epochs=3)
+
+    assert _checkpoint_training_completed({"completed_epochs": 3}, config) is True
+    assert _checkpoint_training_completed({"completed_epochs": 4}, config) is True
+    assert _checkpoint_training_completed({"completed_epochs": 2}, config) is False
+    assert _checkpoint_training_completed(None, config) is False
+
+
+def test_mps_memory_report_formats_gib_values() -> None:
+    torch = FakeMpsMemoryTorch()
+
+    assert _format_mps_memory_report(
+        torch=torch,
+        progress_label="crossfit fold 1/5",
+        stage="before cleanup",
+    ) == (
+        "[bert:crossfit fold 1/5] MPS memory before cleanup: "
+        "current=1.00 GiB, driver=3.00 GiB, recommended=4.00 GiB"
+    )
+
+
 def row(source_id: str, category: str) -> _TrainingRow:
     return _TrainingRow(
         chunk_id=f"{source_id}::0000",
@@ -191,3 +271,38 @@ class FakeMps:
 
     def is_available(self) -> bool:
         return self._available
+
+
+class FakeOptimizer:
+    def __init__(self) -> None:
+        self.zero_grad_calls: list[bool] = []
+
+    def zero_grad(self, *, set_to_none: bool) -> None:
+        self.zero_grad_calls.append(set_to_none)
+
+
+class FakeMpsMemoryTorch:
+    def __init__(self) -> None:
+        self.mps = FakeMpsMemory()
+
+
+class FakeMpsMemory:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def current_allocated_memory(self) -> int:
+        return 1 * 1024**3
+
+    def driver_allocated_memory(self) -> int:
+        if "empty_cache" in self.calls:
+            return 2 * 1024**3
+        return 3 * 1024**3
+
+    def recommended_max_memory(self) -> int:
+        return 4 * 1024**3
+
+    def synchronize(self) -> None:
+        self.calls.append("synchronize")
+
+    def empty_cache(self) -> None:
+        self.calls.append("empty_cache")

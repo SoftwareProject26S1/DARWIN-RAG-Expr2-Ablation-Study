@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import gc
 from hashlib import sha256
 from pathlib import Path
 import random
@@ -592,6 +593,137 @@ def _move_optimizer_state_to_device(optimizer, device) -> None:
                 state[key] = value.to(device)
 
 
+def _checkpoint_training_completed(
+    checkpoint_metadata: Mapping[str, object] | None,
+    config: TransformerTrainingConfig,
+) -> bool:
+    if checkpoint_metadata is None:
+        return False
+    return int(checkpoint_metadata.get("completed_epochs", 0)) >= config.epochs
+
+
+def _is_mps_device(device) -> bool:
+    return getattr(device, "type", str(device)) == "mps"
+
+
+def _bytes_to_gib(value: int) -> float:
+    return value / float(1024**3)
+
+
+def _format_mps_memory_report(
+    *,
+    torch,
+    progress_label: str,
+    stage: str,
+) -> str:
+    current = _bytes_to_gib(int(torch.mps.current_allocated_memory()))
+    driver = _bytes_to_gib(int(torch.mps.driver_allocated_memory()))
+    recommended = _bytes_to_gib(int(torch.mps.recommended_max_memory()))
+    return (
+        f"[bert:{progress_label}] MPS memory {stage}: "
+        f"current={current:.2f} GiB, driver={driver:.2f} GiB, "
+        f"recommended={recommended:.2f} GiB"
+    )
+
+
+def _emit_mps_memory_report(
+    *,
+    torch,
+    device,
+    progress_callback: ProgressCallback | None,
+    progress_label: str,
+    stage: str,
+) -> None:
+    if not _is_mps_device(device) or getattr(torch, "mps", None) is None:
+        return
+    required = (
+        "current_allocated_memory",
+        "driver_allocated_memory",
+        "recommended_max_memory",
+    )
+    if not all(hasattr(torch.mps, name) for name in required):
+        return
+    _emit_progress(
+        progress_callback,
+        _format_mps_memory_report(
+            torch=torch,
+            progress_label=progress_label,
+            stage=stage,
+        ),
+    )
+
+
+def _empty_mps_cache(
+    *,
+    torch,
+    device,
+) -> None:
+    if not _is_mps_device(device) or getattr(torch, "mps", None) is None:
+        return
+    if hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+    if hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
+
+
+def _release_training_memory_for_inference(
+    *,
+    torch,
+    device,
+    optimizer,
+    progress_callback: ProgressCallback | None,
+    progress_label: str,
+) -> None:
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] releasing training memory before inference",
+    )
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="before cleanup",
+    )
+    gc.collect()
+    _empty_mps_cache(torch=torch, device=device)
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="after cleanup",
+    )
+
+
+def _release_inference_memory_after_stage(
+    *,
+    torch,
+    device,
+    progress_callback: ProgressCallback | None,
+    progress_label: str,
+    stage: str,
+) -> None:
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage=f"after {stage} before cache cleanup",
+    )
+    gc.collect()
+    _empty_mps_cache(torch=torch, device=device)
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage=f"after {stage} cache cleanup",
+    )
+
+
 def _fit_predict_transformer_classifier(
     *,
     training_rows: Sequence[_TrainingRow],
@@ -681,142 +813,176 @@ def _fit_predict_transformer_classifier(
     device = _resolve_torch_device(torch, config.device)
     model.to(device)
 
-    generator = torch.Generator()
-    generator.manual_seed(config.seed)
-    training_loader = DataLoader(
-        _ClassifierDataset(
-            rows=training_rows,
-            tokenizer=tokenizer,
-            label_to_index=label_to_index,
-            max_length=config.max_length,
-        ),
-        batch_size=config.train_batch_size,
-        shuffle=True,
-        generator=generator,
-        collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
+    completed_epochs = (
+        int(checkpoint_metadata.get("completed_epochs", 0))
+        if checkpoint_metadata is not None
+        else 0
     )
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
+    global_step = (
+        int(checkpoint_metadata.get("global_step", 0))
+        if checkpoint_metadata is not None
+        else 0
     )
-    total_steps = max(1, len(training_loader) * config.epochs)
-    warmup_steps = int(total_steps * config.warmup_ratio)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
-    )
-    completed_epochs = 0
-    global_step = 0
-    if checkpoint_metadata is not None:
-        training_state = _load_latest_checkpoint_training_state(
-            torch=torch,
-            model_output_dir=model_output_dir,
-        )
-        optimizer.load_state_dict(training_state["optimizer_state"])
-        scheduler.load_state_dict(training_state["scheduler_state"])
-        _move_optimizer_state_to_device(optimizer, device)
-        if "dataloader_generator_state" in training_state:
-            generator.set_state(training_state["dataloader_generator_state"])
-        if "python_random_state" in training_state:
-            random.setstate(training_state["python_random_state"])
-        if "torch_rng_state" in training_state:
-            torch.set_rng_state(training_state["torch_rng_state"])
-        if torch.cuda.is_available() and training_state.get("cuda_rng_state_all") is not None:
-            torch.cuda.set_rng_state_all(training_state["cuda_rng_state_all"])
-        completed_epochs = int(training_state.get("completed_epochs", 0))
-        global_step = int(training_state.get("global_step", 0))
-
-    _emit_progress(
-        progress_callback,
-        (
-            f"[bert:{progress_label}] training {len(training_rows)} chunks "
-            f"from {len(_source_ids(training_rows))} sources across {len(labels)} "
-            f"categories for {config.epochs} epoch(s); "
-            f"batch_size={config.train_batch_size}, total_batches={len(training_loader)}, "
-            f"total_steps={total_steps}, warmup_steps={warmup_steps}, device={device}"
-        ),
-    )
-    model.train()
-    epoch_indexes = _epoch_indexes_to_run(
-        total_epochs=config.epochs,
-        completed_epochs=completed_epochs,
-    )
-    if not epoch_indexes:
+    training_completed = _checkpoint_training_completed(checkpoint_metadata, config)
+    if training_completed:
         _emit_progress(
             progress_callback,
             (
                 f"[bert:{progress_label}] checkpoint already completed "
-                f"{completed_epochs}/{config.epochs} epoch(s); skipping training"
+                f"{completed_epochs}/{config.epochs} epoch(s); "
+                "skipping training state load"
             ),
         )
-    for epoch_index in epoch_indexes:
-        epoch_number = epoch_index + 1
-        epoch_started_at = time.monotonic()
-        processed_chunks = 0
-        _emit_progress(
-            progress_callback,
-            f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} started",
-        )
-        for batch_index, batch in enumerate(training_loader, start=1):
-            optimizer.zero_grad(set_to_none=True)
-            batch_on_device = {
-                key: value.to(device)
-                for key, value in batch.items()
-            }
-            outputs = model(**batch_on_device)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            global_step += 1
-            processed_chunks += int(batch_on_device["labels"].shape[0])
-            if _should_emit_batch_progress(
-                batch_index=batch_index,
-                total_batches=len(training_loader),
-                log_every_batches=config.log_every_batches,
-            ):
-                _emit_progress(
-                    progress_callback,
-                    _format_batch_progress(
-                        progress_label=progress_label,
-                        stage=f"train epoch {epoch_number}/{config.epochs}",
-                        batch_index=batch_index,
-                        total_batches=len(training_loader),
-                        processed_items=processed_chunks,
-                        total_items=len(training_rows),
-                        elapsed_seconds=time.monotonic() - epoch_started_at,
-                        latest_loss=float(loss.detach().cpu().item()),
-                        learning_rate=float(scheduler.get_last_lr()[0]),
-                    ),
-                )
-        _emit_progress(
-            progress_callback,
-            f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} finished",
-        )
-        _write_latest_checkpoint(
-            torch=torch,
-            model=model,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            scheduler=scheduler,
+    else:
+        generator = torch.Generator()
+        generator.manual_seed(config.seed)
+        training_loader = DataLoader(
+            _ClassifierDataset(
+                rows=training_rows,
+                tokenizer=tokenizer,
+                label_to_index=label_to_index,
+                max_length=config.max_length,
+            ),
+            batch_size=config.train_batch_size,
+            shuffle=True,
             generator=generator,
-            model_output_dir=model_output_dir,
-            fingerprint=checkpoint_fingerprint,
-            config=config,
-            labels=labels,
-            completed_epochs=epoch_number,
-            global_step=global_step,
+            collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
         )
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+        total_steps = max(1, len(training_loader) * config.epochs)
+        warmup_steps = int(total_steps * config.warmup_ratio)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+        )
+        if checkpoint_metadata is not None:
+            training_state = _load_latest_checkpoint_training_state(
+                torch=torch,
+                model_output_dir=model_output_dir,
+            )
+            optimizer.load_state_dict(training_state["optimizer_state"])
+            scheduler.load_state_dict(training_state["scheduler_state"])
+            _move_optimizer_state_to_device(optimizer, device)
+            if "dataloader_generator_state" in training_state:
+                generator.set_state(training_state["dataloader_generator_state"])
+            if "python_random_state" in training_state:
+                random.setstate(training_state["python_random_state"])
+            if "torch_rng_state" in training_state:
+                torch.set_rng_state(training_state["torch_rng_state"])
+            if (
+                torch.cuda.is_available()
+                and training_state.get("cuda_rng_state_all") is not None
+            ):
+                torch.cuda.set_rng_state_all(training_state["cuda_rng_state_all"])
+            completed_epochs = int(training_state.get("completed_epochs", 0))
+            global_step = int(training_state.get("global_step", 0))
+
         _emit_progress(
             progress_callback,
-            _checkpoint_saved_message(
-                progress_label=progress_label,
-                checkpoint_dir=_latest_checkpoint_dir(model_output_dir),
-                completed_epochs=epoch_number,
-                total_epochs=config.epochs,
+            (
+                f"[bert:{progress_label}] training {len(training_rows)} chunks "
+                f"from {len(_source_ids(training_rows))} sources across {len(labels)} "
+                f"categories for {config.epochs} epoch(s); "
+                f"batch_size={config.train_batch_size}, "
+                f"total_batches={len(training_loader)}, "
+                f"total_steps={total_steps}, warmup_steps={warmup_steps}, "
+                f"device={device}"
             ),
+        )
+        model.train()
+        batch = batch_on_device = outputs = loss = None
+        epoch_indexes = _epoch_indexes_to_run(
+            total_epochs=config.epochs,
+            completed_epochs=completed_epochs,
+        )
+        for epoch_index in epoch_indexes:
+            epoch_number = epoch_index + 1
+            epoch_started_at = time.monotonic()
+            processed_chunks = 0
+            _emit_progress(
+                progress_callback,
+                f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} started",
+            )
+            for batch_index, batch in enumerate(training_loader, start=1):
+                optimizer.zero_grad(set_to_none=True)
+                batch_on_device = {
+                    key: value.to(device)
+                    for key, value in batch.items()
+                }
+                outputs = model(**batch_on_device)
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                global_step += 1
+                processed_chunks += int(batch_on_device["labels"].shape[0])
+                if _should_emit_batch_progress(
+                    batch_index=batch_index,
+                    total_batches=len(training_loader),
+                    log_every_batches=config.log_every_batches,
+                ):
+                    _emit_progress(
+                        progress_callback,
+                        _format_batch_progress(
+                            progress_label=progress_label,
+                            stage=f"train epoch {epoch_number}/{config.epochs}",
+                            batch_index=batch_index,
+                            total_batches=len(training_loader),
+                            processed_items=processed_chunks,
+                            total_items=len(training_rows),
+                            elapsed_seconds=time.monotonic() - epoch_started_at,
+                            latest_loss=float(loss.detach().cpu().item()),
+                            learning_rate=float(scheduler.get_last_lr()[0]),
+                        ),
+                    )
+            _emit_progress(
+                progress_callback,
+                f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} finished",
+            )
+            _write_latest_checkpoint(
+                torch=torch,
+                model=model,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                generator=generator,
+                model_output_dir=model_output_dir,
+                fingerprint=checkpoint_fingerprint,
+                config=config,
+                labels=labels,
+                completed_epochs=epoch_number,
+                global_step=global_step,
+            )
+            _emit_progress(
+                progress_callback,
+                _checkpoint_saved_message(
+                    progress_label=progress_label,
+                    checkpoint_dir=_latest_checkpoint_dir(model_output_dir),
+                    completed_epochs=epoch_number,
+                    total_epochs=config.epochs,
+                ),
+            )
+        _release_training_memory_for_inference(
+            torch=torch,
+            device=device,
+            optimizer=optimizer,
+            progress_callback=progress_callback,
+            progress_label=progress_label,
+        )
+        del (
+            optimizer,
+            scheduler,
+            training_loader,
+            generator,
+            batch,
+            batch_on_device,
+            outputs,
+            loss,
         )
 
     _emit_progress(
@@ -974,7 +1140,7 @@ def _predict_transformer_logits(
     model.eval()
     total_batches = max(1, (len(rows) + config.eval_batch_size - 1) // config.eval_batch_size)
     started_at = time.monotonic()
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_index, start in enumerate(range(0, len(rows), config.eval_batch_size), start=1):
             batch_rows = rows[start : start + config.eval_batch_size]
             encoded = tokenizer(
@@ -989,7 +1155,8 @@ def _predict_transformer_logits(
                 for key, value in encoded.items()
             }
             output = model(**encoded)
-            logits.extend(output.logits.detach().cpu().tolist())
+            batch_logits = output.logits.detach().cpu().tolist()
+            logits.extend(batch_logits)
             if _should_emit_batch_progress(
                 batch_index=batch_index,
                 total_batches=total_batches,
@@ -1007,6 +1174,14 @@ def _predict_transformer_logits(
                         elapsed_seconds=time.monotonic() - started_at,
                     ),
                 )
+            del batch_rows, encoded, output, batch_logits
+    _release_inference_memory_after_stage(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage=stage,
+    )
     return logits
 
 
