@@ -13,12 +13,18 @@ import pyarrow.parquet as pq
 from .calibration import calibrate_logits, softmax
 from .category_stats import build_category_stats
 from .classifier import (
-    _NaiveBayesTextClassifier,
+    ProgressCallback,
+    TRANSFORMER_MODEL_TYPE,
+    TransformerTrainingConfig,
     _TrainingRow,
+    _emit_progress,
     _file_sha256,
+    _fit_predict_transformer_classifier,
     _metric,
     _prediction_rows,
     _read_training_rows,
+    _source_ids,
+    _split_fit_calibration_rows,
     _write_json,
     _write_jsonl,
 )
@@ -43,9 +49,12 @@ def train_crossfit_classifier(
     output_dir: Path,
     *,
     fold_count: int,
+    training_config: TransformerTrainingConfig | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> CrossfitClassifierResult:
-    """Train fold-local classifiers and write out-of-fold predictions."""
+    """Train fold-local BERT classifiers and write out-of-fold predictions."""
 
+    config = training_config or TransformerTrainingConfig()
     rows = _read_training_rows(chunks_path)
     folds = build_source_folds(
         [
@@ -56,32 +65,51 @@ def train_crossfit_classifier(
     )
     categories = tuple(sorted({row.category for row in rows}))
     prediction_rows: list[dict[str, object]] = []
-    calibration_rows: list[dict[str, object]] = []
+    calibration_report_rows: list[dict[str, object]] = []
     model_references: list[dict[str, object]] = []
+    fold_total = len(folds)
+    _emit_progress(
+        progress_callback,
+        f"[train-classifier:crossfit] preparing {fold_total}-fold BERT crossfit",
+    )
 
     for fold in folds:
+        fold_number = fold.fold_index + 1
+        _emit_progress(
+            progress_callback,
+            f"[train-classifier:crossfit] fold {fold_number}/{fold_total} started",
+        )
         training_rows, validation_rows = _rows_for_fold(rows, fold)
-        classifier = _NaiveBayesTextClassifier.fit(training_rows)
-        if tuple(classifier.labels) != categories:
+        fit_rows, calibration_subset_rows = _split_fit_calibration_rows(
+            training_rows,
+            calibration_fraction=config.calibration_fraction,
+            seed=config.seed + fold.fold_index,
+        )
+        run = _fit_predict_transformer_classifier(
+            training_rows=fit_rows,
+            calibration_rows=calibration_subset_rows,
+            prediction_rows=validation_rows,
+            categories=categories,
+            model_output_dir=output_dir / "models" / f"fold_{fold.fold_index:03d}",
+            config=config,
+            purpose=(
+                "Phase 6 fold-local BERT classifier for out-of-fold "
+                "probability artifacts"
+            ),
+            progress_callback=progress_callback,
+            progress_label=f"crossfit fold {fold_number}/{fold_total}",
+        )
+        if tuple(run.labels) != categories:
             raise ValueError(
-                f"fold {fold.fold_index} training data does not contain every category"
+                f"fold {fold.fold_index} classifier labels do not match categories"
             )
 
-        logits = classifier.decision_function(
-            row.classifier_text
-            for row in validation_rows
-        )
-        label_to_index = {
-            label: index
-            for index, label in enumerate(classifier.labels)
-        }
-        labels = [label_to_index[row.category] for row in validation_rows]
-        calibration = calibrate_logits(logits, labels)
-        probabilities = softmax(logits, calibration.temperature)
+        calibration = calibrate_logits(run.calibration_logits, run.calibration_label_ids)
+        probabilities = softmax(run.prediction_logits, calibration.temperature)
         fold_predictions = _prediction_rows(
             validation_rows,
-            classifier.labels,
-            logits,
+            run.labels,
+            run.prediction_logits,
             probabilities,
         )
         for prediction in fold_predictions:
@@ -90,26 +118,29 @@ def train_crossfit_classifier(
             prediction["temperature"] = _metric(calibration.temperature)
         prediction_rows.extend(fold_predictions)
 
-        calibration_rows.append(
+        calibration_report_rows.append(
             {
                 "fold_index": fold.fold_index,
-                "training_source_count": len(fold.training_source_ids),
+                "fit_source_count": len(_source_ids(fit_rows)),
+                "calibration_source_count": len(_source_ids(calibration_subset_rows)),
                 "validation_source_count": len(fold.validation_source_ids),
+                "fit_source_ids": _source_ids(fit_rows),
+                "calibration_source_ids": _source_ids(calibration_subset_rows),
                 **calibration.to_dict(),
             }
         )
         model_references.append(
             {
                 "fold_index": fold.fold_index,
-                "training_source_count": len(fold.training_source_ids),
+                "fit_source_count": len(_source_ids(fit_rows)),
+                "calibration_source_count": len(_source_ids(calibration_subset_rows)),
                 "validation_source_count": len(fold.validation_source_ids),
-                **classifier.to_model_reference(
-                    purpose=(
-                        "Phase 6 fold-local classifier for out-of-fold "
-                        "probability artifacts"
-                    )
-                ),
+                **run.model_reference,
             }
+        )
+        _emit_progress(
+            progress_callback,
+            f"[train-classifier:crossfit] fold {fold_number}/{fold_total} finished",
         )
 
     prediction_rows = sorted(
@@ -128,7 +159,7 @@ def train_crossfit_classifier(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(output_dir / "folds.json", {"folds": [_fold_to_dict(fold) for fold in folds]})
-    _write_json(output_dir / "calibration_by_fold.json", {"folds": calibration_rows})
+    _write_json(output_dir / "calibration_by_fold.json", {"folds": calibration_report_rows})
     _write_json(output_dir / "model_references.json", {"folds": model_references})
     _write_jsonl(output_dir / "out_of_fold_predictions.jsonl", prediction_rows)
     _write_prediction_rows_parquet(output_dir / "predictions.parquet", prediction_rows)
@@ -139,6 +170,8 @@ def train_crossfit_classifier(
         "phase": 6,
         "mode": "crossfit",
         "smoke_only": False,
+        "model_type": TRANSFORMER_MODEL_TYPE,
+        "base_model": config.model_name,
         "chunks_path": str(chunks_path),
         "chunks_sha256": _file_sha256(chunks_path),
         "fold_count": len(folds),
@@ -146,10 +179,13 @@ def train_crossfit_classifier(
         "prediction_chunk_count": len(prediction_rows),
         "category_count": len(categories),
         "categories": list(categories),
+        "epochs": config.epochs,
+        "training_hyperparameters": config.to_manifest(),
         "probability_source": MANIFEST_PROBABILITY_SOURCE,
         "lambda_c_interpretation": LAMBDA_C_INTERPRETATION,
         "lambda_c_not": LAMBDA_C_NOT,
         "artifact_files": [
+            "models/",
             "folds.json",
             "calibration_by_fold.json",
             "model_references.json",
