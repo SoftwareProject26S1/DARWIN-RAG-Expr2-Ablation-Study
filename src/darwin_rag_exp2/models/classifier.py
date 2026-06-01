@@ -474,6 +474,19 @@ def _latest_checkpoint_dir(model_output_dir: Path) -> Path:
     return model_output_dir / "checkpoints" / "latest"
 
 
+def _checkpoint_saved_message(
+    *,
+    progress_label: str,
+    checkpoint_dir: Path,
+    completed_epochs: int,
+    total_epochs: int,
+) -> str:
+    return (
+        f"[bert:{progress_label}] checkpoint saved to {checkpoint_dir} "
+        f"after epoch {completed_epochs}/{total_epochs}"
+    )
+
+
 def _load_latest_checkpoint_metadata(
     model_output_dir: Path,
     *,
@@ -795,6 +808,15 @@ def _fit_predict_transformer_classifier(
             labels=labels,
             completed_epochs=epoch_number,
             global_step=global_step,
+        )
+        _emit_progress(
+            progress_callback,
+            _checkpoint_saved_message(
+                progress_label=progress_label,
+                checkpoint_dir=_latest_checkpoint_dir(model_output_dir),
+                completed_epochs=epoch_number,
+                total_epochs=config.epochs,
+            ),
         )
 
     _emit_progress(

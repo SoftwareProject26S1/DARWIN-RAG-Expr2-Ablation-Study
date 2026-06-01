@@ -6,6 +6,7 @@ from darwin_rag_exp2.models.classifier import (
     TransformerTrainingConfig,
     _TrainingRow,
     _checkpoint_fingerprint,
+    _checkpoint_saved_message,
     _epoch_indexes_to_run,
     _latest_checkpoint_dir,
     _load_latest_checkpoint_metadata,
@@ -76,6 +77,20 @@ def test_checkpoint_metadata_rejects_incompatible_fingerprint(tmp_path) -> None:
 def test_epoch_indexes_to_run_resume_from_next_epoch() -> None:
     assert list(_epoch_indexes_to_run(total_epochs=3, completed_epochs=1)) == [1, 2]
     assert list(_epoch_indexes_to_run(total_epochs=3, completed_epochs=3)) == []
+
+
+def test_checkpoint_saved_message_reports_checkpoint_path(tmp_path) -> None:
+    message = _checkpoint_saved_message(
+        progress_label="crossfit fold 1/5",
+        checkpoint_dir=tmp_path / "model" / "checkpoints" / "latest",
+        completed_epochs=2,
+        total_epochs=3,
+    )
+
+    assert message == (
+        "[bert:crossfit fold 1/5] checkpoint saved to "
+        f"{tmp_path / 'model' / 'checkpoints' / 'latest'} after epoch 2/3"
+    )
 
 
 def row(source_id: str, category: str) -> _TrainingRow:

@@ -96,6 +96,11 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
         assert f"[train-classifier:crossfit] fold {fold_number}/3 started" in captured
         assert f"[bert:crossfit fold {fold_number}/3] epoch 1/1 started" in captured
         assert f"[bert:crossfit fold {fold_number}/3] epoch 1/1 finished" in captured
+        assert (
+            f"[train-classifier:crossfit] fold {fold_number}/3 partial artifact saved to "
+            f"{output_path / 'partial' / f'fold_{fold_number - 1:03d}.json'}"
+            in captured
+        )
         assert f"[train-classifier:crossfit] fold {fold_number}/3 finished" in captured
     assert len(calls) == 3
     assert all(call["config"].log_every_batches == 9 for call in calls)
@@ -294,6 +299,11 @@ def test_train_classifier_crossfit_resume_reuses_completed_partial_fold(
     assert result == 0
     captured = capsys.readouterr().out
     assert "[train-classifier:crossfit] fold 1/2 resumed from partial artifact" in captured
+    assert (
+        "[train-classifier:crossfit] fold 2/2 partial artifact saved to "
+        f"{output_path / 'partial' / 'fold_001.json'}"
+        in captured
+    )
     assert len(calls) == 1
     assert calls[0]["progress_label"] == "crossfit fold 2/2"
     predictions = [

@@ -178,6 +178,13 @@ def train_crossfit_classifier(
         )
         _emit_progress(
             progress_callback,
+            (
+                f"[train-classifier:crossfit] fold {fold_number}/{fold_total} "
+                f"partial artifact saved to {_fold_partial_path(output_dir, fold.fold_index)}"
+            ),
+        )
+        _emit_progress(
+            progress_callback,
             f"[train-classifier:crossfit] fold {fold_number}/{fold_total} finished",
         )
 
