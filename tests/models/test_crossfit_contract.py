@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pyarrow as pa
@@ -311,6 +312,34 @@ def test_train_classifier_crossfit_resume_reuses_completed_partial_fold(
         for line in (output_path / "out_of_fold_predictions.jsonl").read_text().splitlines()
     ]
     assert len(predictions) == len(rows)
+
+
+def test_fold_partial_is_read_as_utf8(monkeypatch, tmp_path) -> None:
+    output_path = tmp_path / "classifier" / "crossfit"
+    partial_path = output_path / "partial" / "fold_000.json"
+    partial_path.parent.mkdir(parents=True)
+    partial_path.write_text("{}", encoding="utf-8")
+    payload = {
+        "schema_version": 1,
+        "fingerprint": "fingerprint",
+        "predictions": [{"category": "학사"}],
+    }
+    encodings = []
+
+    def fake_read_text(self, *, encoding=None):
+        encodings.append(encoding)
+        return json.dumps(payload, ensure_ascii=False)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    loaded = crossfit_module._load_fold_partial(
+        output_path,
+        fold_index=0,
+        expected_fingerprint="fingerprint",
+    )
+
+    assert loaded == payload
+    assert encodings == ["utf-8"]
 
 
 def chunk_row(source_id: str, category: str, classifier_text: str) -> dict[str, object]:

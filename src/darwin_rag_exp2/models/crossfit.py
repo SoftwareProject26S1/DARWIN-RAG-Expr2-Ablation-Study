@@ -300,7 +300,7 @@ def _load_fold_partial(
     path = _fold_partial_path(output_dir, fold_index)
     if not path.exists():
         return None
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema_version") != 1:
         raise ValueError(f"incompatible partial fold schema at {path}")
     if payload.get("fingerprint") != expected_fingerprint:

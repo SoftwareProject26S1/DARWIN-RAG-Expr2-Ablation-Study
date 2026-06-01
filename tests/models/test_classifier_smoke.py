@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from darwin_rag_exp2.cli import main
+from darwin_rag_exp2.cli import main, _classifier_model_from_config
 import darwin_rag_exp2.models.classifier as classifier_module
 from darwin_rag_exp2.models.classifier import (
     TransformerTrainingConfig,
@@ -212,6 +212,18 @@ def test_batch_progress_message_reports_status_metrics() -> None:
     assert "chunks/s=16.00" in message
 
 
+def test_classifier_model_config_is_read_as_utf8() -> None:
+    config_path = RecordingTextPath(
+        'experiment:\n  primary_categories:\n    - "학사"\n'
+        "models:\n  classifier: klue/bert-base\n"
+    )
+
+    model_name = _classifier_model_from_config(config_path)
+
+    assert model_name == "klue/bert-base"
+    assert config_path.encoding == "utf-8"
+
+
 def test_classifier_dataset_tokenizes_without_global_padding() -> None:
     tokenizer = RecordingTokenizer()
     rows = [
@@ -281,3 +293,13 @@ class RecordingTokenizer:
             "input_ids": [1, 2, 3],
             "attention_mask": [1, 1, 1],
         }
+
+
+class RecordingTextPath:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.encoding = None
+
+    def read_text(self, *, encoding=None) -> str:
+        self.encoding = encoding
+        return self.text

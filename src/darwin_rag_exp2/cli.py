@@ -215,7 +215,7 @@ def train_classifier_command(
 
 
 def _classifier_model_from_config(config_path: Path) -> str:
-    payload = yaml.safe_load(config_path.read_text()) or {}
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     models = payload.get("models") or {}
     model_name = models.get("classifier")
     if not isinstance(model_name, str) or not model_name.strip():
