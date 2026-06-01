@@ -10,6 +10,7 @@ from darwin_rag_exp2.models.classifier import (
     _epoch_indexes_to_run,
     _latest_checkpoint_dir,
     _load_latest_checkpoint_metadata,
+    _resolve_torch_device,
     _write_latest_checkpoint,
 )
 
@@ -93,6 +94,30 @@ def test_checkpoint_saved_message_reports_checkpoint_path(tmp_path) -> None:
     )
 
 
+def test_auto_device_resolution_prefers_cuda_over_mps() -> None:
+    torch = FakeTorchDevice(cuda_available=True, mps_available=True)
+
+    assert _resolve_torch_device(torch, "auto") == "cuda"
+
+
+def test_auto_device_resolution_falls_back_to_mps_then_cpu() -> None:
+    assert _resolve_torch_device(
+        FakeTorchDevice(cuda_available=False, mps_available=True),
+        "auto",
+    ) == "mps"
+    assert _resolve_torch_device(
+        FakeTorchDevice(cuda_available=False, mps_available=False),
+        "auto",
+    ) == "cpu"
+
+
+def test_explicit_device_resolution_uses_requested_device() -> None:
+    assert _resolve_torch_device(
+        FakeTorchDevice(cuda_available=True, mps_available=True),
+        "cpu",
+    ) == "cpu"
+
+
 def row(source_id: str, category: str) -> _TrainingRow:
     return _TrainingRow(
         chunk_id=f"{source_id}::0000",
@@ -136,3 +161,33 @@ class FakeGenerator:
 
     def get_state(self):
         return self.state
+
+
+class FakeTorchDevice:
+    def __init__(self, *, cuda_available: bool, mps_available: bool) -> None:
+        self.cuda = FakeCuda(cuda_available)
+        self.backends = FakeBackends(mps_available)
+
+    def device(self, name: str) -> str:
+        return name
+
+
+class FakeCuda:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class FakeBackends:
+    def __init__(self, mps_available: bool) -> None:
+        self.mps = FakeMps(mps_available)
+
+
+class FakeMps:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available

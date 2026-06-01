@@ -951,10 +951,10 @@ def _format_learning_rate(value: float) -> str:
 def _resolve_torch_device(torch, requested: str):
     if requested != "auto":
         return torch.device(requested)
-    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        return torch.device("mps")
     if torch.cuda.is_available():
         return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
     return torch.device("cpu")
 
 
