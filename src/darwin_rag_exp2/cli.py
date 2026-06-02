@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
 
 from .data.artifacts import write_chunk_artifacts
 from .data.audit import audit_notice_export, write_audit_artifacts
@@ -19,7 +20,11 @@ from .data.filtering import (
 from .indexing.artifacts import build_index_artifacts, load_indexing_config
 from .indexing.embeddings import HashEmbeddingModel, SentenceTransformerEmbeddingModel
 from .indexing.faiss_store import FaissIndexWriter
-from .models.classifier import train_single_classifier
+from .models.classifier import (
+    TransformerTrainingConfig,
+    train_final_classifier,
+    train_single_classifier,
+)
 from .models.crossfit import train_crossfit_classifier
 
 
@@ -119,17 +124,60 @@ def train_classifier_command(
         typer.Option("--max-sources-per-category"),
     ] = 12,
     folds: Annotated[int, typer.Option("--folds")] = 5,
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    model_name: Annotated[
+        str | None,
+        typer.Option("--model"),
+    ] = None,
+    max_length: Annotated[int, typer.Option("--max-length")] = 512,
+    epochs: Annotated[int | None, typer.Option("--epochs")] = None,
+    train_batch_size: Annotated[int, typer.Option("--train-batch-size")] = 8,
+    eval_batch_size: Annotated[int, typer.Option("--eval-batch-size")] = 16,
+    learning_rate: Annotated[float, typer.Option("--learning-rate")] = 2e-5,
+    weight_decay: Annotated[float, typer.Option("--weight-decay")] = 0.01,
+    warmup_ratio: Annotated[float, typer.Option("--warmup-ratio")] = 0.1,
+    calibration_fraction: Annotated[
+        float,
+        typer.Option("--calibration-fraction"),
+    ] = 0.1,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+    device: Annotated[str, typer.Option("--device")] = "auto",
+    log_every_batches: Annotated[int, typer.Option("--log-every-batches")] = 25,
+    resume: Annotated[bool, typer.Option("--resume")] = False,
 ) -> None:
     """Train Phase 5/6 classifier artifacts."""
+
+    resolved_model_name = model_name or _classifier_model_from_config(config_path)
+    resolved_epochs = epochs if epochs is not None else (1 if mode == "single" else 3)
+    training_config = TransformerTrainingConfig(
+        model_name=resolved_model_name,
+        max_length=max_length,
+        epochs=resolved_epochs,
+        train_batch_size=train_batch_size,
+        eval_batch_size=eval_batch_size,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        warmup_ratio=warmup_ratio,
+        calibration_fraction=calibration_fraction,
+        seed=seed,
+        device=device,
+        log_every_batches=log_every_batches,
+    )
 
     if mode == "single":
         result = train_single_classifier(
             chunks_path,
             output_path,
             max_sources_per_category=max_sources_per_category,
+            training_config=training_config,
+            progress_callback=typer.echo,
+            resume=resume,
         )
         typer.echo(
-            f"Wrote Phase 5 single classifier smoke artifacts to {output_path} "
+            f"Wrote Phase 5 BERT single classifier smoke artifacts to {output_path} "
             f"({result.manifest['training_chunk_count']} chunks, "
             f"T={result.calibration['temperature']})"
         )
@@ -139,14 +187,40 @@ def train_classifier_command(
             chunks_path,
             output_path,
             fold_count=folds,
+            training_config=training_config,
+            progress_callback=typer.echo,
+            resume=resume,
         )
         typer.echo(
-            f"Wrote Phase 6 crossfit classifier artifacts to {output_path} "
+            f"Wrote Phase 6 BERT crossfit classifier artifacts to {output_path} "
             f"({result.manifest['prediction_chunk_count']} OOF predictions, "
             f"{result.manifest['fold_count']} folds)"
         )
         return
-    raise typer.BadParameter("supported classifier modes: single, crossfit")
+    if mode == "final":
+        result = train_final_classifier(
+            chunks_path,
+            output_path,
+            training_config=training_config,
+            progress_callback=typer.echo,
+            resume=resume,
+        )
+        typer.echo(
+            f"Wrote final BERT query classifier artifacts to {output_path} "
+            f"({result.manifest['training_chunk_count']} chunks, "
+            f"T={result.calibration['temperature']})"
+        )
+        return
+    raise typer.BadParameter("supported classifier modes: single, crossfit, final")
+
+
+def _classifier_model_from_config(config_path: Path) -> str:
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    models = payload.get("models") or {}
+    model_name = models.get("classifier")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise typer.BadParameter("config must define models.classifier")
+    return model_name
 
 
 @app.command("build-indexes")

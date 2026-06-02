@@ -1,14 +1,16 @@
-"""Single-model classifier smoke pipeline for Phase 5."""
+"""BERT-based classifier training pipelines for Phase 5 and query-time use."""
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import gc
 from hashlib import sha256
-import math
 from pathlib import Path
-import re
+import random
+import shutil
+import time
 
 import orjson
 import pyarrow as pa
@@ -18,12 +20,79 @@ from .calibration import calibrate_logits, softmax
 from .category_stats import build_category_stats
 
 
-_TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣]+")
+TRANSFORMER_MODEL_TYPE = "transformer_sequence_classification"
+FINAL_PROBABILITY_SOURCE = "full_corpus_calibrated_query_classifier"
+CHECKPOINT_SCHEMA_VERSION = 1
+ProgressCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class TransformerTrainingConfig:
+    """Hyperparameters for deterministic BERT fine-tuning."""
+
+    model_name: str = "klue/bert-base"
+    max_length: int = 512
+    epochs: int = 3
+    train_batch_size: int = 8
+    eval_batch_size: int = 16
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    calibration_fraction: float = 0.1
+    seed: int = 42
+    device: str = "auto"
+    log_every_batches: int = 25
+
+    def __post_init__(self) -> None:
+        if self.max_length <= 0:
+            raise ValueError("max_length must be positive")
+        if self.epochs <= 0:
+            raise ValueError("epochs must be positive")
+        if self.train_batch_size <= 0:
+            raise ValueError("train_batch_size must be positive")
+        if self.eval_batch_size <= 0:
+            raise ValueError("eval_batch_size must be positive")
+        if self.learning_rate <= 0:
+            raise ValueError("learning_rate must be positive")
+        if self.weight_decay < 0:
+            raise ValueError("weight_decay must be non-negative")
+        if not 0 <= self.warmup_ratio < 1:
+            raise ValueError("warmup_ratio must be in [0, 1)")
+        if not 0 <= self.calibration_fraction < 1:
+            raise ValueError("calibration_fraction must be in [0, 1)")
+        if self.log_every_batches < 0:
+            raise ValueError("log_every_batches must be non-negative")
+
+    def to_manifest(self) -> dict[str, object]:
+        """Return JSON-serializable training settings."""
+
+        return {
+            "model_name": self.model_name,
+            "max_length": self.max_length,
+            "epochs": self.epochs,
+            "train_batch_size": self.train_batch_size,
+            "eval_batch_size": self.eval_batch_size,
+            "learning_rate": self.learning_rate,
+            "weight_decay": self.weight_decay,
+            "warmup_ratio": self.warmup_ratio,
+            "calibration_fraction": self.calibration_fraction,
+            "seed": self.seed,
+            "device": self.device,
+            "log_every_batches": self.log_every_batches,
+        }
 
 
 @dataclass(frozen=True)
 class SingleClassifierResult:
     """Artifact metadata from the Phase 5 smoke run."""
+
+    manifest: dict[str, object]
+    calibration: dict[str, float]
+
+
+@dataclass(frozen=True)
+class FinalClassifierResult:
+    """Artifact metadata from the full-corpus query classifier run."""
 
     manifest: dict[str, object]
     calibration: dict[str, float]
@@ -37,115 +106,43 @@ class _TrainingRow:
     classifier_text: str
 
 
-class _NaiveBayesTextClassifier:
-    """Small deterministic text classifier used only for smoke plumbing."""
+@dataclass(frozen=True)
+class _TransformerRunResult:
+    labels: tuple[str, ...]
+    model_reference: dict[str, object]
+    calibration_logits: list[list[float]]
+    calibration_label_ids: list[int]
+    prediction_logits: list[list[float]]
+
+
+class _ClassifierDataset:
+    """Tokenized classifier rows with batch-level dynamic padding left to the collator."""
 
     def __init__(
         self,
         *,
-        labels: tuple[str, ...],
-        class_doc_counts: Mapping[str, int],
-        class_token_counts: Mapping[str, Counter[str]],
-        alpha: float,
-    ) -> None:
-        self.labels = labels
-        self.class_doc_counts = dict(class_doc_counts)
-        self.class_token_counts = {
-            label: Counter(counts)
-            for label, counts in class_token_counts.items()
-        }
-        self.alpha = alpha
-        self.vocabulary = sorted(
-            {
-                token
-                for counts in self.class_token_counts.values()
-                for token in counts
-            }
-        )
-        self.class_token_totals = {
-            label: sum(self.class_token_counts[label].values())
-            for label in self.labels
-        }
-
-    @classmethod
-    def fit(
-        cls,
         rows: Sequence[_TrainingRow],
-        *,
-        alpha: float = 1.0,
-    ) -> "_NaiveBayesTextClassifier":
-        if not rows:
-            raise ValueError("single classifier smoke training requires rows")
-        labels = tuple(sorted({row.category for row in rows}))
-        if len(labels) < 2:
-            raise ValueError("single classifier smoke training requires >=2 categories")
+        tokenizer,
+        label_to_index: Mapping[str, int],
+        max_length: int,
+    ) -> None:
+        self.features = [
+            {
+                **tokenizer(
+                    row.classifier_text,
+                    truncation=True,
+                    max_length=max_length,
+                ),
+                "label": label_to_index[row.category],
+            }
+            for row in rows
+        ]
 
-        class_doc_counts: Counter[str] = Counter()
-        class_token_counts: dict[str, Counter[str]] = defaultdict(Counter)
-        for row in rows:
-            class_doc_counts[row.category] += 1
-            class_token_counts[row.category].update(_tokenize(row.classifier_text))
+    def __len__(self) -> int:
+        return len(self.features)
 
-        return cls(
-            labels=labels,
-            class_doc_counts=class_doc_counts,
-            class_token_counts=class_token_counts,
-            alpha=alpha,
-        )
-
-    def decision_function(self, texts: Iterable[str]) -> list[list[float]]:
-        """Return per-label log scores for each text."""
-
-        return [self._logits(text) for text in texts]
-
-    def to_model_reference(
-        self,
-        *,
-        purpose: str = "Phase 5 single-mode plumbing smoke, not official results",
-    ) -> dict[str, object]:
-        """Return lightweight model metadata without storing full training text."""
-
-        return {
-            "model_type": "multinomial_naive_bayes_smoke",
-            "purpose": purpose,
-            "labels": list(self.labels),
-            "alpha": self.alpha,
-            "vocabulary_size": len(self.vocabulary),
-            "class_doc_counts": self.class_doc_counts,
-            "class_token_totals": self.class_token_totals,
-            "top_tokens_by_class": {
-                label: [
-                    token
-                    for token, _ in self.class_token_counts[label].most_common(20)
-                ]
-                for label in self.labels
-            },
-        }
-
-    def _logits(self, text: str) -> list[float]:
-        tokens = _tokenize(text)
-        token_counts = Counter(tokens)
-        total_docs = sum(self.class_doc_counts.values())
-        label_count = len(self.labels)
-        vocabulary_size = max(len(self.vocabulary), 1)
-        logits: list[float] = []
-
-        for label in self.labels:
-            prior = math.log(
-                (self.class_doc_counts[label] + self.alpha)
-                / (total_docs + self.alpha * label_count)
-            )
-            denominator = (
-                self.class_token_totals[label] + self.alpha * vocabulary_size
-            )
-            log_score = prior
-            for token, count in token_counts.items():
-                token_probability = (
-                    self.class_token_counts[label][token] + self.alpha
-                ) / denominator
-                log_score += count * math.log(token_probability)
-            logits.append(log_score)
-        return logits
+    def __getitem__(self, index: int) -> dict[str, object]:
+        return dict(self.features[index])
 
 
 def train_single_classifier(
@@ -154,29 +151,51 @@ def train_single_classifier(
     *,
     max_sources_per_category: int = 12,
     max_chunks_per_category: int = 80,
+    training_config: TransformerTrainingConfig | None = None,
+    progress_callback: ProgressCallback | None = None,
+    resume: bool = False,
 ) -> SingleClassifierResult:
-    """Train the Phase 5 in-sample single classifier smoke pipeline."""
+    """Train the Phase 5 BERT single-model smoke pipeline."""
 
+    config = training_config or TransformerTrainingConfig(epochs=1)
+    _emit_progress(
+        progress_callback,
+        "[train-classifier:single] preparing BERT fine-tuning",
+    )
     rows = _select_smoke_rows(
         _read_training_rows(chunks_path),
         max_sources_per_category=max_sources_per_category,
         max_chunks_per_category=max_chunks_per_category,
     )
-    classifier = _NaiveBayesTextClassifier.fit(rows)
-    logits = classifier.decision_function(row.classifier_text for row in rows)
-    label_to_index = {label: index for index, label in enumerate(classifier.labels)}
-    labels = [label_to_index[row.category] for row in rows]
-    calibration = calibrate_logits(logits, labels)
-    probabilities = softmax(logits, calibration.temperature)
-    prediction_rows = _prediction_rows(rows, classifier.labels, logits, probabilities)
+    categories = tuple(sorted({row.category for row in rows}))
+    fit_rows, calibration_rows = _split_fit_calibration_rows(
+        rows,
+        calibration_fraction=config.calibration_fraction,
+        seed=config.seed,
+    )
+    run = _fit_predict_transformer_classifier(
+        training_rows=fit_rows,
+        calibration_rows=calibration_rows,
+        prediction_rows=rows,
+        categories=categories,
+        model_output_dir=output_dir / "model",
+        config=config,
+        purpose="Phase 5 single-mode BERT fine-tuning smoke",
+        progress_callback=progress_callback,
+        progress_label="single",
+        resume=resume,
+    )
+    calibration = calibrate_logits(run.calibration_logits, run.calibration_label_ids)
+    probabilities = softmax(run.prediction_logits, calibration.temperature)
+    prediction_rows = _prediction_rows(rows, run.labels, run.prediction_logits, probabilities)
     category_stats = build_category_stats(
         prediction_rows,
-        categories=classifier.labels,
+        categories=run.labels,
         smoke_only=True,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(output_dir / "model_reference.json", classifier.to_model_reference())
+    _write_json(output_dir / "model_reference.json", run.model_reference)
     _write_json(output_dir / "calibration.json", calibration.to_dict())
     _write_jsonl(output_dir / "sample_predictions.jsonl", prediction_rows)
     _write_json(output_dir / "category_stats.json", {"rows": category_stats})
@@ -186,16 +205,24 @@ def train_single_classifier(
         "phase": 5,
         "mode": "single",
         "smoke_only": True,
+        "model_type": TRANSFORMER_MODEL_TYPE,
+        "base_model": config.model_name,
         "chunks_path": str(chunks_path),
         "chunks_sha256": _file_sha256(chunks_path),
-        "training_chunk_count": len(rows),
-        "training_source_count": len({row.source_id for row in rows}),
-        "category_count": len(classifier.labels),
-        "categories": list(classifier.labels),
+        "training_chunk_count": len(fit_rows),
+        "training_source_count": len({row.source_id for row in fit_rows}),
+        "calibration_chunk_count": len(calibration_rows),
+        "calibration_source_count": len({row.source_id for row in calibration_rows}),
+        "prediction_chunk_count": len(rows),
+        "category_count": len(run.labels),
+        "categories": list(run.labels),
+        "epochs": config.epochs,
+        "training_hyperparameters": config.to_manifest(),
         "temperature": calibration.temperature,
         "ece_before": calibration.ece_before,
         "ece_after": calibration.ece_after,
         "artifact_files": [
+            "model/",
             "model_reference.json",
             "calibration.json",
             "sample_predictions.jsonl",
@@ -206,6 +233,89 @@ def train_single_classifier(
     }
     _write_json(output_dir / "manifest.json", manifest)
     return SingleClassifierResult(
+        manifest=manifest,
+        calibration=calibration.to_dict(),
+    )
+
+
+def train_final_classifier(
+    chunks_path: Path,
+    output_dir: Path,
+    *,
+    training_config: TransformerTrainingConfig | None = None,
+    progress_callback: ProgressCallback | None = None,
+    resume: bool = False,
+) -> FinalClassifierResult:
+    """Train the full-corpus calibrated BERT classifier for query-time routing."""
+
+    config = training_config or TransformerTrainingConfig()
+    _emit_progress(
+        progress_callback,
+        "[train-classifier:final] preparing full-corpus BERT fine-tuning",
+    )
+    rows = _read_training_rows(chunks_path)
+    categories = tuple(sorted({row.category for row in rows}))
+    fit_rows, calibration_rows = _split_fit_calibration_rows(
+        rows,
+        calibration_fraction=config.calibration_fraction,
+        seed=config.seed,
+    )
+    run = _fit_predict_transformer_classifier(
+        training_rows=fit_rows,
+        calibration_rows=calibration_rows,
+        prediction_rows=calibration_rows,
+        categories=categories,
+        model_output_dir=output_dir / "model",
+        config=config,
+        purpose="Final full-corpus BERT classifier for query-time routing",
+        progress_callback=progress_callback,
+        progress_label="final",
+        resume=resume,
+    )
+    calibration = calibrate_logits(run.calibration_logits, run.calibration_label_ids)
+    probabilities = softmax(run.prediction_logits, calibration.temperature)
+    calibration_predictions = _prediction_rows(
+        calibration_rows,
+        run.labels,
+        run.prediction_logits,
+        probabilities,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(output_dir / "model_reference.json", run.model_reference)
+    _write_json(output_dir / "calibration.json", calibration.to_dict())
+    _write_jsonl(output_dir / "calibration_predictions.jsonl", calibration_predictions)
+
+    manifest: dict[str, object] = {
+        "phase": 6,
+        "mode": "final",
+        "smoke_only": False,
+        "model_type": TRANSFORMER_MODEL_TYPE,
+        "base_model": config.model_name,
+        "probability_source": FINAL_PROBABILITY_SOURCE,
+        "chunks_path": str(chunks_path),
+        "chunks_sha256": _file_sha256(chunks_path),
+        "training_chunk_count": len(fit_rows),
+        "training_source_count": len({row.source_id for row in fit_rows}),
+        "calibration_chunk_count": len(calibration_rows),
+        "calibration_source_count": len({row.source_id for row in calibration_rows}),
+        "category_count": len(run.labels),
+        "categories": list(run.labels),
+        "epochs": config.epochs,
+        "training_hyperparameters": config.to_manifest(),
+        "temperature": calibration.temperature,
+        "ece_before": calibration.ece_before,
+        "ece_after": calibration.ece_after,
+        "artifact_files": [
+            "model/",
+            "model_reference.json",
+            "calibration.json",
+            "calibration_predictions.jsonl",
+            "manifest.json",
+        ],
+    }
+    _write_json(output_dir / "manifest.json", manifest)
+    return FinalClassifierResult(
         manifest=manifest,
         calibration=calibration.to_dict(),
     )
@@ -262,6 +372,819 @@ def _select_smoke_rows(
     return selected
 
 
+def _split_fit_calibration_rows(
+    rows: Sequence[_TrainingRow],
+    *,
+    calibration_fraction: float,
+    seed: int,
+) -> tuple[list[_TrainingRow], list[_TrainingRow]]:
+    """Split rows by source so calibration text is not used for fitting."""
+
+    if not rows:
+        raise ValueError("classifier training requires rows")
+    if not 0 <= calibration_fraction < 1:
+        raise ValueError("calibration_fraction must be in [0, 1)")
+
+    rows_by_source: dict[str, list[_TrainingRow]] = defaultdict(list)
+    category_by_source: dict[str, str] = {}
+    for row in rows:
+        rows_by_source[row.source_id].append(row)
+        previous = category_by_source.get(row.source_id)
+        if previous is not None and previous != row.category:
+            raise ValueError(f"source_id {row.source_id!r} has multiple categories")
+        category_by_source[row.source_id] = row.category
+
+    sources_by_category: dict[str, list[str]] = defaultdict(list)
+    for source_id, category in category_by_source.items():
+        sources_by_category[category].append(source_id)
+
+    rng = random.Random(seed)
+    calibration_sources: set[str] = set()
+    for category in sorted(sources_by_category):
+        sources = sorted(sources_by_category[category])
+        if len(sources) < 2:
+            continue
+        shuffled = list(sources)
+        rng.shuffle(shuffled)
+        requested = max(1, round(len(sources) * calibration_fraction))
+        count = min(requested, len(sources) - 1)
+        calibration_sources.update(shuffled[:count])
+
+    if not calibration_sources:
+        return list(rows), list(rows)
+
+    fit_rows = [
+        row
+        for row in rows
+        if row.source_id not in calibration_sources
+    ]
+    calibration_rows = [
+        row
+        for row in rows
+        if row.source_id in calibration_sources
+    ]
+    if not fit_rows or not calibration_rows:
+        return list(rows), list(rows)
+    return fit_rows, calibration_rows
+
+
+def _source_ids(rows: Sequence[_TrainingRow]) -> list[str]:
+    return sorted({row.source_id for row in rows})
+
+
+def _label_ids(rows: Sequence[_TrainingRow], labels: Sequence[str]) -> list[int]:
+    label_to_index = {label: index for index, label in enumerate(labels)}
+    return [label_to_index[row.category] for row in rows]
+
+
+def _checkpoint_fingerprint(
+    *,
+    training_rows: Sequence[_TrainingRow],
+    calibration_rows: Sequence[_TrainingRow],
+    prediction_rows: Sequence[_TrainingRow],
+    categories: Sequence[str],
+    config: TransformerTrainingConfig,
+    purpose: str,
+) -> str:
+    payload = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "purpose": purpose,
+        "categories": list(categories),
+        "training_rows": _fingerprint_rows(training_rows),
+        "calibration_rows": _fingerprint_rows(calibration_rows),
+        "prediction_rows": _fingerprint_rows(prediction_rows),
+        "training_hyperparameters": config.to_manifest(),
+    }
+    return sha256(
+        orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
+    ).hexdigest()
+
+
+def _fingerprint_rows(rows: Sequence[_TrainingRow]) -> list[dict[str, str]]:
+    return [
+        {
+            "chunk_id": row.chunk_id,
+            "source_id": row.source_id,
+            "category": row.category,
+        }
+        for row in rows
+    ]
+
+
+def _latest_checkpoint_dir(model_output_dir: Path) -> Path:
+    return model_output_dir / "checkpoints" / "latest"
+
+
+def _checkpoint_saved_message(
+    *,
+    progress_label: str,
+    checkpoint_dir: Path,
+    completed_epochs: int,
+    total_epochs: int,
+) -> str:
+    return (
+        f"[bert:{progress_label}] checkpoint saved to {checkpoint_dir} "
+        f"after epoch {completed_epochs}/{total_epochs}"
+    )
+
+
+def _load_latest_checkpoint_metadata(
+    model_output_dir: Path,
+    *,
+    expected_fingerprint: str,
+) -> dict[str, object] | None:
+    checkpoint_dir = _latest_checkpoint_dir(model_output_dir)
+    metadata_path = checkpoint_dir / "checkpoint.json"
+    if not checkpoint_dir.exists():
+        return None
+    if not metadata_path.exists():
+        raise ValueError(f"checkpoint at {checkpoint_dir} is missing checkpoint.json")
+    metadata = orjson.loads(metadata_path.read_bytes())
+    if metadata.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(f"incompatible checkpoint schema at {metadata_path}")
+    if metadata.get("fingerprint") != expected_fingerprint:
+        raise ValueError(f"incompatible checkpoint at {checkpoint_dir}")
+    return metadata
+
+
+def _load_latest_checkpoint_training_state(
+    *,
+    torch,
+    model_output_dir: Path,
+) -> Mapping[str, object]:
+    state_path = _latest_checkpoint_dir(model_output_dir) / "training_state.pt"
+    if not state_path.exists():
+        raise ValueError(f"checkpoint at {_latest_checkpoint_dir(model_output_dir)} is missing training_state.pt")
+    try:
+        return torch.load(state_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(state_path, map_location="cpu")
+
+
+def _write_latest_checkpoint(
+    *,
+    torch,
+    model,
+    tokenizer,
+    optimizer,
+    scheduler,
+    generator,
+    model_output_dir: Path,
+    fingerprint: str,
+    config: TransformerTrainingConfig,
+    labels: Sequence[str],
+    completed_epochs: int,
+    global_step: int,
+) -> None:
+    checkpoint_dir = _latest_checkpoint_dir(model_output_dir)
+    tmp_dir = checkpoint_dir.with_name("latest.tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(tmp_dir)
+    tokenizer.save_pretrained(tmp_dir)
+    torch.save(
+        {
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "dataloader_generator_state": generator.get_state(),
+            "python_random_state": random.getstate(),
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state_all": (
+                torch.cuda.get_rng_state_all()
+                if getattr(torch, "cuda", None) is not None and torch.cuda.is_available()
+                else None
+            ),
+            "completed_epochs": completed_epochs,
+            "global_step": global_step,
+        },
+        tmp_dir / "training_state.pt",
+    )
+    _write_json(
+        tmp_dir / "checkpoint.json",
+        {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "base_model": config.model_name,
+            "labels": list(labels),
+            "completed_epochs": completed_epochs,
+            "total_epochs": config.epochs,
+            "global_step": global_step,
+            "training_hyperparameters": config.to_manifest(),
+        },
+    )
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    tmp_dir.rename(checkpoint_dir)
+
+
+def _epoch_indexes_to_run(
+    *,
+    total_epochs: int,
+    completed_epochs: int,
+) -> range:
+    return range(completed_epochs, total_epochs)
+
+
+def _move_optimizer_state_to_device(optimizer, device) -> None:
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if hasattr(value, "to"):
+                state[key] = value.to(device)
+
+
+def _checkpoint_training_completed(
+    checkpoint_metadata: Mapping[str, object] | None,
+    config: TransformerTrainingConfig,
+) -> bool:
+    if checkpoint_metadata is None:
+        return False
+    return int(checkpoint_metadata.get("completed_epochs", 0)) >= config.epochs
+
+
+def _is_mps_device(device) -> bool:
+    return getattr(device, "type", str(device)) == "mps"
+
+
+def _bytes_to_gib(value: int) -> float:
+    return value / float(1024**3)
+
+
+def _format_mps_memory_report(
+    *,
+    torch,
+    progress_label: str,
+    stage: str,
+) -> str:
+    current = _bytes_to_gib(int(torch.mps.current_allocated_memory()))
+    driver = _bytes_to_gib(int(torch.mps.driver_allocated_memory()))
+    recommended = _bytes_to_gib(int(torch.mps.recommended_max_memory()))
+    return (
+        f"[bert:{progress_label}] MPS memory {stage}: "
+        f"current={current:.2f} GiB, driver={driver:.2f} GiB, "
+        f"recommended={recommended:.2f} GiB"
+    )
+
+
+def _emit_mps_memory_report(
+    *,
+    torch,
+    device,
+    progress_callback: ProgressCallback | None,
+    progress_label: str,
+    stage: str,
+) -> None:
+    if not _is_mps_device(device) or getattr(torch, "mps", None) is None:
+        return
+    required = (
+        "current_allocated_memory",
+        "driver_allocated_memory",
+        "recommended_max_memory",
+    )
+    if not all(hasattr(torch.mps, name) for name in required):
+        return
+    _emit_progress(
+        progress_callback,
+        _format_mps_memory_report(
+            torch=torch,
+            progress_label=progress_label,
+            stage=stage,
+        ),
+    )
+
+
+def _empty_mps_cache(
+    *,
+    torch,
+    device,
+) -> None:
+    if not _is_mps_device(device) or getattr(torch, "mps", None) is None:
+        return
+    if hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+    if hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
+
+
+def _release_training_memory_for_inference(
+    *,
+    torch,
+    device,
+    optimizer,
+    progress_callback: ProgressCallback | None,
+    progress_label: str,
+) -> None:
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] releasing training memory before inference",
+    )
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="before cleanup",
+    )
+    gc.collect()
+    _empty_mps_cache(torch=torch, device=device)
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="after cleanup",
+    )
+
+
+def _release_inference_memory_after_stage(
+    *,
+    torch,
+    device,
+    progress_callback: ProgressCallback | None,
+    progress_label: str,
+    stage: str,
+) -> None:
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage=f"after {stage} before cache cleanup",
+    )
+    gc.collect()
+    _empty_mps_cache(torch=torch, device=device)
+    _emit_mps_memory_report(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage=f"after {stage} cache cleanup",
+    )
+
+
+def _fit_predict_transformer_classifier(
+    *,
+    training_rows: Sequence[_TrainingRow],
+    calibration_rows: Sequence[_TrainingRow],
+    prediction_rows: Sequence[_TrainingRow],
+    categories: Sequence[str],
+    model_output_dir: Path,
+    config: TransformerTrainingConfig,
+    purpose: str,
+    progress_callback: ProgressCallback | None = None,
+    progress_label: str = "classifier",
+    resume: bool = False,
+) -> _TransformerRunResult:
+    """Fine-tune a Hugging Face sequence classifier and return raw logits."""
+
+    if not training_rows:
+        raise ValueError("transformer fine-tuning requires training rows")
+    if not calibration_rows:
+        raise ValueError("transformer calibration requires calibration rows")
+    if not prediction_rows:
+        raise ValueError("transformer prediction requires prediction rows")
+
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] loading training dependencies",
+    )
+    try:
+        import torch
+        from torch.utils.data import DataLoader
+        from transformers import (
+            AutoModelForSequenceClassification,
+            AutoTokenizer,
+            DataCollatorWithPadding,
+            get_linear_schedule_with_warmup,
+        )
+    except ImportError as exc:  # pragma: no cover - exercised by environment
+        raise RuntimeError(
+            "BERT fine-tuning requires the classifier dependency group: "
+            "uv run --group classifier ..."
+        ) from exc
+
+    labels = tuple(categories)
+    label_to_index = {label: index for index, label in enumerate(labels)}
+    id_to_label = {index: label for label, index in label_to_index.items()}
+    random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
+
+    checkpoint_fingerprint = _checkpoint_fingerprint(
+        training_rows=training_rows,
+        calibration_rows=calibration_rows,
+        prediction_rows=prediction_rows,
+        categories=labels,
+        config=config,
+        purpose=purpose,
+    )
+    checkpoint_metadata = (
+        _load_latest_checkpoint_metadata(
+            model_output_dir,
+            expected_fingerprint=checkpoint_fingerprint,
+        )
+        if resume
+        else None
+    )
+    checkpoint_dir = _latest_checkpoint_dir(model_output_dir)
+    model_load_path = checkpoint_dir if checkpoint_metadata is not None else config.model_name
+    if checkpoint_metadata is not None:
+        _emit_progress(
+            progress_callback,
+            (
+                f"[bert:{progress_label}] resuming from checkpoint "
+                f"{checkpoint_dir} after epoch {checkpoint_metadata['completed_epochs']}"
+            ),
+        )
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] loading tokenizer/model {model_load_path}",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_load_path)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_load_path,
+        num_labels=len(labels),
+        label2id=label_to_index,
+        id2label=id_to_label,
+    )
+    device = _resolve_torch_device(torch, config.device)
+    model.to(device)
+
+    completed_epochs = (
+        int(checkpoint_metadata.get("completed_epochs", 0))
+        if checkpoint_metadata is not None
+        else 0
+    )
+    global_step = (
+        int(checkpoint_metadata.get("global_step", 0))
+        if checkpoint_metadata is not None
+        else 0
+    )
+    training_completed = _checkpoint_training_completed(checkpoint_metadata, config)
+    if training_completed:
+        _emit_progress(
+            progress_callback,
+            (
+                f"[bert:{progress_label}] checkpoint already completed "
+                f"{completed_epochs}/{config.epochs} epoch(s); "
+                "skipping training state load"
+            ),
+        )
+    else:
+        generator = torch.Generator()
+        generator.manual_seed(config.seed)
+        training_loader = DataLoader(
+            _ClassifierDataset(
+                rows=training_rows,
+                tokenizer=tokenizer,
+                label_to_index=label_to_index,
+                max_length=config.max_length,
+            ),
+            batch_size=config.train_batch_size,
+            shuffle=True,
+            generator=generator,
+            collate_fn=DataCollatorWithPadding(tokenizer=tokenizer),
+        )
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+        total_steps = max(1, len(training_loader) * config.epochs)
+        warmup_steps = int(total_steps * config.warmup_ratio)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+        )
+        if checkpoint_metadata is not None:
+            training_state = _load_latest_checkpoint_training_state(
+                torch=torch,
+                model_output_dir=model_output_dir,
+            )
+            optimizer.load_state_dict(training_state["optimizer_state"])
+            scheduler.load_state_dict(training_state["scheduler_state"])
+            _move_optimizer_state_to_device(optimizer, device)
+            if "dataloader_generator_state" in training_state:
+                generator.set_state(training_state["dataloader_generator_state"])
+            if "python_random_state" in training_state:
+                random.setstate(training_state["python_random_state"])
+            if "torch_rng_state" in training_state:
+                torch.set_rng_state(training_state["torch_rng_state"])
+            if (
+                torch.cuda.is_available()
+                and training_state.get("cuda_rng_state_all") is not None
+            ):
+                torch.cuda.set_rng_state_all(training_state["cuda_rng_state_all"])
+            completed_epochs = int(training_state.get("completed_epochs", 0))
+            global_step = int(training_state.get("global_step", 0))
+
+        _emit_progress(
+            progress_callback,
+            (
+                f"[bert:{progress_label}] training {len(training_rows)} chunks "
+                f"from {len(_source_ids(training_rows))} sources across {len(labels)} "
+                f"categories for {config.epochs} epoch(s); "
+                f"batch_size={config.train_batch_size}, "
+                f"total_batches={len(training_loader)}, "
+                f"total_steps={total_steps}, warmup_steps={warmup_steps}, "
+                f"device={device}"
+            ),
+        )
+        model.train()
+        batch = batch_on_device = outputs = loss = None
+        epoch_indexes = _epoch_indexes_to_run(
+            total_epochs=config.epochs,
+            completed_epochs=completed_epochs,
+        )
+        for epoch_index in epoch_indexes:
+            epoch_number = epoch_index + 1
+            epoch_started_at = time.monotonic()
+            processed_chunks = 0
+            _emit_progress(
+                progress_callback,
+                f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} started",
+            )
+            for batch_index, batch in enumerate(training_loader, start=1):
+                optimizer.zero_grad(set_to_none=True)
+                batch_on_device = {
+                    key: value.to(device)
+                    for key, value in batch.items()
+                }
+                outputs = model(**batch_on_device)
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                global_step += 1
+                processed_chunks += int(batch_on_device["labels"].shape[0])
+                if _should_emit_batch_progress(
+                    batch_index=batch_index,
+                    total_batches=len(training_loader),
+                    log_every_batches=config.log_every_batches,
+                ):
+                    _emit_progress(
+                        progress_callback,
+                        _format_batch_progress(
+                            progress_label=progress_label,
+                            stage=f"train epoch {epoch_number}/{config.epochs}",
+                            batch_index=batch_index,
+                            total_batches=len(training_loader),
+                            processed_items=processed_chunks,
+                            total_items=len(training_rows),
+                            elapsed_seconds=time.monotonic() - epoch_started_at,
+                            latest_loss=float(loss.detach().cpu().item()),
+                            learning_rate=float(scheduler.get_last_lr()[0]),
+                        ),
+                    )
+            _emit_progress(
+                progress_callback,
+                f"[bert:{progress_label}] epoch {epoch_number}/{config.epochs} finished",
+            )
+            _write_latest_checkpoint(
+                torch=torch,
+                model=model,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                generator=generator,
+                model_output_dir=model_output_dir,
+                fingerprint=checkpoint_fingerprint,
+                config=config,
+                labels=labels,
+                completed_epochs=epoch_number,
+                global_step=global_step,
+            )
+            _emit_progress(
+                progress_callback,
+                _checkpoint_saved_message(
+                    progress_label=progress_label,
+                    checkpoint_dir=_latest_checkpoint_dir(model_output_dir),
+                    completed_epochs=epoch_number,
+                    total_epochs=config.epochs,
+                ),
+            )
+        _release_training_memory_for_inference(
+            torch=torch,
+            device=device,
+            optimizer=optimizer,
+            progress_callback=progress_callback,
+            progress_label=progress_label,
+        )
+        del (
+            optimizer,
+            scheduler,
+            training_loader,
+            generator,
+            batch,
+            batch_on_device,
+            outputs,
+            loss,
+        )
+
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] saving model to {model_output_dir}",
+    )
+    model_output_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(model_output_dir)
+    tokenizer.save_pretrained(model_output_dir)
+
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] running calibration inference",
+    )
+    calibration_logits = _predict_transformer_logits(
+        torch=torch,
+        model=model,
+        tokenizer=tokenizer,
+        rows=calibration_rows,
+        config=config,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="calibration inference",
+    )
+    _emit_progress(
+        progress_callback,
+        f"[bert:{progress_label}] running prediction inference",
+    )
+    prediction_logits = _predict_transformer_logits(
+        torch=torch,
+        model=model,
+        tokenizer=tokenizer,
+        rows=prediction_rows,
+        config=config,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage="prediction inference",
+    )
+    model_reference: dict[str, object] = {
+        "model_type": TRANSFORMER_MODEL_TYPE,
+        "base_model": config.model_name,
+        "model_dir": str(model_output_dir),
+        "purpose": purpose,
+        "labels": list(labels),
+        "label2id": label_to_index,
+        "id2label": {str(index): label for index, label in id_to_label.items()},
+        "training_chunk_count": len(training_rows),
+        "training_source_count": len(_source_ids(training_rows)),
+        "calibration_chunk_count": len(calibration_rows),
+        "calibration_source_count": len(_source_ids(calibration_rows)),
+        "prediction_chunk_count": len(prediction_rows),
+        "resolved_device": str(device),
+        "training_hyperparameters": config.to_manifest(),
+    }
+    return _TransformerRunResult(
+        labels=labels,
+        model_reference=model_reference,
+        calibration_logits=calibration_logits,
+        calibration_label_ids=_label_ids(calibration_rows, labels),
+        prediction_logits=prediction_logits,
+    )
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(message)
+
+
+def _should_emit_batch_progress(
+    *,
+    batch_index: int,
+    total_batches: int,
+    log_every_batches: int,
+) -> bool:
+    if log_every_batches <= 0:
+        return False
+    return batch_index == total_batches or batch_index % log_every_batches == 0
+
+
+def _format_batch_progress(
+    *,
+    progress_label: str,
+    stage: str,
+    batch_index: int,
+    total_batches: int,
+    processed_items: int,
+    total_items: int,
+    elapsed_seconds: float,
+    latest_loss: float | None = None,
+    learning_rate: float | None = None,
+) -> str:
+    progress_fraction = batch_index / max(total_batches, 1)
+    remaining_batches = max(total_batches - batch_index, 0)
+    seconds_per_batch = elapsed_seconds / max(batch_index, 1)
+    eta_seconds = seconds_per_batch * remaining_batches
+    throughput = processed_items / elapsed_seconds if elapsed_seconds > 0 else 0.0
+    parts = [
+        (
+            f"[bert:{progress_label}] {stage} batch {batch_index}/{total_batches} "
+            f"({progress_fraction * 100:.1f}%)"
+        ),
+        f"items={processed_items}/{total_items}",
+    ]
+    if latest_loss is not None:
+        parts.append(f"loss={latest_loss:.4f}")
+    if learning_rate is not None:
+        parts.append(f"lr={_format_learning_rate(learning_rate)}")
+    parts.extend(
+        [
+            f"elapsed={_format_duration(elapsed_seconds)}",
+            f"eta={_format_duration(eta_seconds)}",
+            f"chunks/s={throughput:.2f}",
+        ]
+    )
+    return " | ".join(parts)
+
+
+def _format_duration(seconds: float) -> str:
+    seconds_int = max(0, int(round(seconds)))
+    return f"{seconds_int}s"
+
+
+def _format_learning_rate(value: float) -> str:
+    return f"{value:.10f}".rstrip("0").rstrip(".")
+
+
+def _resolve_torch_device(torch, requested: str):
+    if requested != "auto":
+        return torch.device(requested)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _predict_transformer_logits(
+    *,
+    torch,
+    model,
+    tokenizer,
+    rows: Sequence[_TrainingRow],
+    config: TransformerTrainingConfig,
+    device,
+    progress_callback: ProgressCallback | None = None,
+    progress_label: str = "classifier",
+    stage: str = "inference",
+) -> list[list[float]]:
+    logits: list[list[float]] = []
+    model.eval()
+    total_batches = max(1, (len(rows) + config.eval_batch_size - 1) // config.eval_batch_size)
+    started_at = time.monotonic()
+    with torch.inference_mode():
+        for batch_index, start in enumerate(range(0, len(rows), config.eval_batch_size), start=1):
+            batch_rows = rows[start : start + config.eval_batch_size]
+            encoded = tokenizer(
+                [row.classifier_text for row in batch_rows],
+                truncation=True,
+                padding=True,
+                max_length=config.max_length,
+                return_tensors="pt",
+            )
+            encoded = {
+                key: value.to(device)
+                for key, value in encoded.items()
+            }
+            output = model(**encoded)
+            batch_logits = output.logits.detach().cpu().tolist()
+            logits.extend(batch_logits)
+            if _should_emit_batch_progress(
+                batch_index=batch_index,
+                total_batches=total_batches,
+                log_every_batches=config.log_every_batches,
+            ):
+                _emit_progress(
+                    progress_callback,
+                    _format_batch_progress(
+                        progress_label=progress_label,
+                        stage=stage,
+                        batch_index=batch_index,
+                        total_batches=total_batches,
+                        processed_items=len(logits),
+                        total_items=len(rows),
+                        elapsed_seconds=time.monotonic() - started_at,
+                    ),
+                )
+            del batch_rows, encoded, output, batch_logits
+    _release_inference_memory_after_stage(
+        torch=torch,
+        device=device,
+        progress_callback=progress_callback,
+        progress_label=progress_label,
+        stage=stage,
+    )
+    return logits
+
+
 def _prediction_rows(
     rows: Sequence[_TrainingRow],
     labels: Sequence[str],
@@ -294,14 +1217,6 @@ def _prediction_rows(
             }
         )
     return predictions
-
-
-def _tokenize(text: str) -> list[str]:
-    tokens = [
-        match.group(0).lower()
-        for match in _TOKEN_PATTERN.finditer(text)
-    ]
-    return tokens or ["__empty__"]
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
