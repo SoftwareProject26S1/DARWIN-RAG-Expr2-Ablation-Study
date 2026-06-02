@@ -297,11 +297,15 @@ explicit category-duplication provenance.
 
 ```bash
 uv run pytest tests/indexing
+uv run darwin-exp2 build-embeddings --chunks artifacts/chunks/chunks.parquet --output artifacts/embeddings
 uv run darwin-exp2 build-indexes --chunks artifacts/chunks/chunks.parquet --predictions artifacts/classifier/crossfit/predictions.parquet --output artifacts/indexes
 ```
 
 Expected artifacts: FAISS files, ID maps, partition-assignment Parquet, model
-and corpus hashes, and an immutable index manifest.
+and corpus hashes, reusable chunk embedding artifacts, and an immutable index
+manifest. If embeddings were already generated on a GPU server, reuse them with
+`--embeddings artifacts/embeddings` to avoid recomputing `BAAI/bge-m3` chunk
+vectors.
 
 ## Phase 8: Query Pool And Annotation Contract
 

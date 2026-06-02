@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
+from .embedding_artifacts import load_embedding_artifacts
 from .embeddings import EmbeddingModel, l2_normalize
 from .partitions import build_partition_assignments
 
@@ -61,10 +62,11 @@ def build_index_artifacts(
     chunks_path: Path,
     predictions_path: Path,
     output_dir: Path,
-    embedding_model: EmbeddingModel,
+    embedding_model: EmbeddingModel | None,
     index_writer: IndexWriter,
     ingest_threshold: float,
     embedding_model_name: str,
+    embedding_artifacts_dir: Path | None = None,
     normalize_embeddings: bool = True,
     similarity_metric: str = "cosine_via_inner_product",
 ) -> IndexBuildResult:
@@ -83,14 +85,28 @@ def build_index_artifacts(
             f"missing predictions for {len(missing_prediction_chunks)} chunks"
         )
 
-    texts = [str(row["body_text"]) for row in chunk_rows]
-    vectors = embedding_model.encode(texts)
-    if len(vectors) != len(chunk_rows):
-        raise ValueError("embedding model returned a different row count")
-    vectors = l2_normalize(vectors) if normalize_embeddings else [
-        [float(value) for value in vector]
-        for vector in vectors
-    ]
+    embedding_manifest: dict[str, object] | None = None
+    if embedding_artifacts_dir is not None:
+        loaded_embeddings = load_embedding_artifacts(
+            embedding_artifacts_dir,
+            chunks_path=chunks_path,
+            expected_embedding_model=embedding_model_name,
+            expected_normalize_embeddings=normalize_embeddings,
+            expected_similarity_metric=similarity_metric,
+        )
+        vectors = loaded_embeddings.vectors.astype("float32").tolist()
+        embedding_manifest = loaded_embeddings.manifest
+    else:
+        if embedding_model is None:
+            raise ValueError("embedding_model is required without embedding artifacts")
+        texts = [str(row["body_text"]) for row in chunk_rows]
+        vectors = embedding_model.encode(texts)
+        if len(vectors) != len(chunk_rows):
+            raise ValueError("embedding model returned a different row count")
+        vectors = l2_normalize(vectors) if normalize_embeddings else [
+            [float(value) for value in vector]
+            for vector in vectors
+        ]
     dimension = len(vectors[0]) if vectors else 0
     if dimension == 0:
         raise ValueError("cannot build indexes without vectors")
@@ -150,6 +166,10 @@ def build_index_artifacts(
             ]
         ],
     }
+    if embedding_artifacts_dir is not None and embedding_manifest is not None:
+        manifest["embedding_artifacts_path"] = str(embedding_artifacts_dir)
+        manifest["embedding_vectors_sha256"] = str(embedding_manifest["vectors_sha256"])
+        manifest["embedding_id_map_sha256"] = str(embedding_manifest["id_map_sha256"])
     _write_json(output_dir / "manifest.json", manifest)
     return IndexBuildResult(manifest=manifest)
 

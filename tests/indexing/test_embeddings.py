@@ -1,7 +1,15 @@
 import math
+import json
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+from darwin_rag_exp2.indexing.embedding_artifacts import (
+    build_embedding_artifacts,
+    load_embedding_artifacts,
+)
 from darwin_rag_exp2.indexing.embeddings import HashEmbeddingModel, l2_normalize
 
 
@@ -32,3 +40,117 @@ def test_hash_embedding_model_is_deterministic_and_normalized() -> None:
         round(math.sqrt(sum(value * value for value in row)), 12) == 1.0
         for row in first
     )
+
+
+def test_build_embedding_artifacts_writes_vectors_id_map_and_manifest(tmp_path) -> None:
+    chunks_path = tmp_path / "chunks.parquet"
+    output_path = tmp_path / "embeddings"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                chunk_row("c2", "s2", "장학", "장학 신청 안내"),
+                chunk_row("c1", "s1", "학사", "학사 일정 안내"),
+            ]
+        ),
+        chunks_path,
+    )
+
+    result = build_embedding_artifacts(
+        chunks_path=chunks_path,
+        output_dir=output_path,
+        embedding_model=HashEmbeddingModel(dimension=6),
+        embedding_model_name="deterministic-hash",
+        normalize_embeddings=True,
+        similarity_metric="cosine_via_inner_product",
+    )
+
+    vectors = np.load(output_path / "vectors.npy")
+    id_rows = pq.read_table(output_path / "id_map.parquet").to_pylist()
+    manifest = json.loads((output_path / "manifest.json").read_text(encoding="utf-8"))
+
+    assert result.manifest["phase"] == 7
+    assert vectors.dtype == np.float32
+    assert vectors.shape == (2, 6)
+    assert np.allclose(np.linalg.norm(vectors, axis=1), np.ones(2))
+    assert [
+        (row["vector_index"], row["chunk_id"], row["source_id"], row["source_category"])
+        for row in id_rows
+    ] == [
+        (0, "c1", "s1", "학사"),
+        (1, "c2", "s2", "장학"),
+    ]
+    assert manifest["artifact_files"] == [
+        "vectors.npy",
+        "id_map.parquet",
+        "manifest.json",
+    ]
+    assert manifest["chunk_count"] == 2
+    assert manifest["embedding_dimension"] == 6
+    assert manifest["embedding_model"] == "deterministic-hash"
+    assert manifest["normalize_embeddings"] is True
+    assert manifest["similarity_metric"] == "cosine_via_inner_product"
+    assert manifest["vectors_sha256"] == result.manifest["vectors_sha256"]
+    assert manifest["id_map_sha256"] == result.manifest["id_map_sha256"]
+
+
+def test_load_embedding_artifacts_rejects_chunk_id_order_mismatch(tmp_path) -> None:
+    chunks_path = tmp_path / "chunks.parquet"
+    output_path = tmp_path / "embeddings"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                chunk_row("c1", "s1", "학사", "학사 일정 안내"),
+                chunk_row("c2", "s2", "장학", "장학 신청 안내"),
+            ]
+        ),
+        chunks_path,
+    )
+    build_embedding_artifacts(
+        chunks_path=chunks_path,
+        output_dir=output_path,
+        embedding_model=HashEmbeddingModel(dimension=6),
+        embedding_model_name="deterministic-hash",
+        normalize_embeddings=True,
+        similarity_metric="cosine_via_inner_product",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "vector_index": 0,
+                    "chunk_id": "c2",
+                    "source_id": "s2",
+                    "source_category": "장학",
+                },
+                {
+                    "vector_index": 1,
+                    "chunk_id": "c1",
+                    "source_id": "s1",
+                    "source_category": "학사",
+                },
+            ]
+        ),
+        output_path / "id_map.parquet",
+    )
+
+    with pytest.raises(ValueError, match="chunk_id order"):
+        load_embedding_artifacts(
+            output_path,
+            chunks_path=chunks_path,
+            expected_embedding_model="deterministic-hash",
+            expected_normalize_embeddings=True,
+        )
+
+
+def chunk_row(
+    chunk_id: str,
+    source_id: str,
+    category: str,
+    body_text: str,
+) -> dict[str, object]:
+    return {
+        "chunk_id": chunk_id,
+        "source_id": source_id,
+        "category": category,
+        "body_text": body_text,
+    }
