@@ -18,6 +18,7 @@ from .data.filtering import (
     write_corpus_artifacts,
 )
 from .indexing.artifacts import build_index_artifacts, load_indexing_config
+from .indexing.embedding_artifacts import build_embedding_artifacts
 from .indexing.embeddings import HashEmbeddingModel, SentenceTransformerEmbeddingModel
 from .indexing.faiss_store import FaissIndexWriter
 from .models.classifier import (
@@ -223,6 +224,46 @@ def _classifier_model_from_config(config_path: Path) -> str:
     return model_name
 
 
+@app.command("build-embeddings")
+def build_embeddings_command(
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    embedding_backend: Annotated[
+        str,
+        typer.Option("--embedding-backend"),
+    ] = "sentence-transformers",
+    embedding_model_name: Annotated[
+        str | None,
+        typer.Option("--embedding-model"),
+    ] = None,
+) -> None:
+    """Build reusable Phase 7 chunk embedding artifacts."""
+
+    config = load_indexing_config(config_path)
+    model_name = embedding_model_name or config.embedding_model
+    embedding_model = _load_embedding_model(embedding_backend, model_name)
+    result = build_embedding_artifacts(
+        chunks_path=chunks_path,
+        output_dir=output_path,
+        embedding_model=embedding_model,
+        embedding_model_name=model_name,
+        normalize_embeddings=config.normalize_embeddings,
+        similarity_metric=config.similarity_metric,
+    )
+    typer.echo(
+        f"Wrote Phase 7 embeddings to {output_path} "
+        f"({result.manifest['chunk_count']} chunks, "
+        f"{result.manifest['embedding_dimension']} dimensions)"
+    )
+
+
 @app.command("build-indexes")
 def build_indexes_command(
     chunks_path: Annotated[
@@ -238,6 +279,10 @@ def build_indexes_command(
         Path,
         typer.Option("--config", exists=True, dir_okay=False, readable=True),
     ] = Path("configs/experiment.default.yaml"),
+    embeddings_path: Annotated[
+        Path | None,
+        typer.Option("--embeddings", exists=True, file_okay=False, readable=True),
+    ] = None,
     ingest_threshold: Annotated[float, typer.Option("--ingest-threshold")] = 0.5,
     embedding_backend: Annotated[
         str,
@@ -252,12 +297,11 @@ def build_indexes_command(
 
     config = load_indexing_config(config_path)
     model_name = embedding_model_name or config.embedding_model
-    if embedding_backend == "sentence-transformers":
-        embedding_model = SentenceTransformerEmbeddingModel(model_name)
-    elif embedding_backend == "hash":
-        embedding_model = HashEmbeddingModel()
-    else:
-        raise typer.BadParameter("supported embedding backends: sentence-transformers, hash")
+    embedding_model = (
+        None
+        if embeddings_path is not None
+        else _load_embedding_model(embedding_backend, model_name)
+    )
 
     result = build_index_artifacts(
         chunks_path=chunks_path,
@@ -267,6 +311,7 @@ def build_indexes_command(
         index_writer=FaissIndexWriter(),
         ingest_threshold=ingest_threshold,
         embedding_model_name=model_name,
+        embedding_artifacts_dir=embeddings_path,
         normalize_embeddings=config.normalize_embeddings,
         similarity_metric=config.similarity_metric,
     )
@@ -275,6 +320,17 @@ def build_indexes_command(
         f"({result.manifest['chunk_count']} chunks, "
         f"{len(result.manifest['category_indexes'])} category indexes)"
     )
+
+
+def _load_embedding_model(
+    embedding_backend: str,
+    model_name: str,
+) -> HashEmbeddingModel | SentenceTransformerEmbeddingModel:
+    if embedding_backend == "sentence-transformers":
+        return SentenceTransformerEmbeddingModel(model_name)
+    if embedding_backend == "hash":
+        return HashEmbeddingModel()
+    raise typer.BadParameter("supported embedding backends: sentence-transformers, hash")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
