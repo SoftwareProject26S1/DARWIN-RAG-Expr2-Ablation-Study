@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
 
+import orjson
 import typer
 import yaml
 
@@ -27,6 +28,24 @@ from .models.classifier import (
     train_single_classifier,
 )
 from .models.crossfit import train_crossfit_classifier
+from .retrieval.faiss_backend import FaissSearchBackend
+from .retrieval.query_classifier import FinalQueryClassifier
+from .retrieval.query_features import (
+    build_query_features,
+    embed_query_rows,
+    load_query_rows,
+    probabilities_from_query_rows,
+)
+from .retrieval.runner import run_primary_queries, write_primary_run
+from .retrieval.settings import (
+    build_lambda_by_category,
+    load_primary_run_settings,
+    write_primary_run_settings,
+)
+from .retrieval.tuning import (
+    tune_adaptive_lambda_parameters,
+    tune_primary_settings,
+)
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -319,6 +338,333 @@ def build_indexes_command(
         f"Wrote Phase 7 indexes to {output_path} "
         f"({result.manifest['chunk_count']} chunks, "
         f"{len(result.manifest['category_indexes'])} category indexes)"
+    )
+
+
+@app.command("tune-primary")
+def tune_primary_command(
+    queries_path: Annotated[
+        Path,
+        typer.Option("--queries", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    indexes_path: Annotated[
+        Path,
+        typer.Option("--indexes", exists=True, file_okay=False, readable=True),
+    ] = Path("artifacts/indexes"),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    category_stats_path: Annotated[
+        Path,
+        typer.Option("--category-stats", dir_okay=False, readable=True),
+    ] = Path("artifacts/classifier/crossfit/category_stats.json"),
+    query_classifier_path: Annotated[
+        Path | None,
+        typer.Option("--query-classifier", file_okay=False, readable=True),
+    ] = Path("artifacts/classifier/final"),
+    embedding_backend: Annotated[
+        str,
+        typer.Option("--embedding-backend"),
+    ] = "sentence-transformers",
+    embedding_model_name: Annotated[
+        str | None,
+        typer.Option("--embedding-model"),
+    ] = None,
+    classifier_device: Annotated[
+        str,
+        typer.Option("--classifier-device"),
+    ] = "auto",
+    theta_grid: Annotated[
+        str,
+        typer.Option("--theta-grid"),
+    ] = "0.5,0.6,0.7,0.8,0.9",
+    fixed_lambda_grid: Annotated[
+        str | None,
+        typer.Option("--fixed-lambda-grid"),
+    ] = None,
+    adaptive_alpha: Annotated[float, typer.Option("--adaptive-alpha")] = 8.0,
+    adaptive_rho: Annotated[float, typer.Option("--adaptive-rho")] = 4.0,
+    adaptive_tau: Annotated[float, typer.Option("--adaptive-tau")] = 0.5,
+    adaptive_alpha_grid: Annotated[
+        str | None,
+        typer.Option("--adaptive-alpha-grid"),
+    ] = None,
+    adaptive_rho_grid: Annotated[
+        str | None,
+        typer.Option("--adaptive-rho-grid"),
+    ] = None,
+    adaptive_tau_grid: Annotated[
+        str | None,
+        typer.Option("--adaptive-tau-grid"),
+    ] = None,
+    metric_key: Annotated[str, typer.Option("--metric")] = "ndcg@10",
+) -> None:
+    """Tune Phase 9 primary retrieval settings on dev queries."""
+
+    if not category_stats_path.exists():
+        raise typer.BadParameter(f"missing category stats: {category_stats_path}")
+    config = load_indexing_config(config_path)
+    retrieval_defaults = _retrieval_defaults_from_config(config_path)
+    model_name = embedding_model_name or config.embedding_model
+    query_rows = load_query_rows(queries_path)
+    embedding_model = _load_embedding_model(embedding_backend, model_name)
+    embeddings_by_query_id = embed_query_rows(
+        query_rows,
+        embedding_model=embedding_model,
+        normalize_embeddings=config.normalize_embeddings,
+    )
+    probabilities_by_query_id, probability_source = _load_query_probabilities(
+        query_rows,
+        query_classifier_path=query_classifier_path,
+        classifier_device=classifier_device,
+    )
+    query_features = build_query_features(
+        query_rows,
+        embeddings_by_query_id=embeddings_by_query_id,
+        probabilities_by_query_id=probabilities_by_query_id,
+    )
+    category_stats_rows = _load_category_stats_rows(category_stats_path)
+    lambda_by_category = build_lambda_by_category(
+        category_stats_rows,
+        alpha=adaptive_alpha,
+        rho=adaptive_rho,
+        tau=adaptive_tau,
+    )
+    search_backend = FaissSearchBackend(indexes_path)
+    settings, diagnostics = tune_primary_settings(
+        query_features,
+        search_backend=search_backend,
+        candidate_k_per_partition=int(retrieval_defaults["candidate_k_per_partition"]),
+        report_top_k=int(retrieval_defaults["report_top_k"]),
+        generation_context_top_n=int(retrieval_defaults["generation_context_top_n"]),
+        theta_candidates=_parse_float_grid(theta_grid),
+        lambda_fixed_candidates=(
+            _parse_float_grid(fixed_lambda_grid)
+            if fixed_lambda_grid is not None
+            else [
+                float(value)
+                for value in retrieval_defaults["fixed_lambda_grid"]
+            ]
+        ),
+        lambda_by_category=lambda_by_category,
+        metric_key=metric_key,
+    )
+    settings, adaptive_diagnostics = tune_adaptive_lambda_parameters(
+        query_features,
+        search_backend=search_backend,
+        base_settings=settings,
+        category_stats_rows=category_stats_rows,
+        alpha_candidates=(
+            _parse_float_grid(adaptive_alpha_grid)
+            if adaptive_alpha_grid is not None
+            else [adaptive_alpha]
+        ),
+        rho_candidates=(
+            _parse_float_grid(adaptive_rho_grid)
+            if adaptive_rho_grid is not None
+            else [adaptive_rho]
+        ),
+        tau_candidates=(
+            _parse_float_grid(adaptive_tau_grid)
+            if adaptive_tau_grid is not None
+            else [adaptive_tau]
+        ),
+        metric_key=metric_key,
+    )
+    diagnostics = {
+        **diagnostics,
+        "query_count": len(query_features),
+        "probability_source": probability_source,
+        "adaptive_lambda": adaptive_diagnostics["best_parameters"],
+        "p_score_tuning": adaptive_diagnostics,
+    }
+    write_primary_run_settings(
+        output_path / "frozen.yaml",
+        candidate_k_per_partition=settings.candidate_k_per_partition,
+        report_top_k=settings.report_top_k,
+        generation_context_top_n=settings.generation_context_top_n,
+        theta_route=settings.theta_route,
+        lambda_fixed=settings.lambda_fixed,
+        lambda_by_category=settings.lambda_by_category,
+        tuning_metadata=diagnostics,
+    )
+    _write_json(output_path / "tuning.json", diagnostics)
+    typer.echo(
+        f"Wrote Phase 9 primary settings to {output_path} "
+        f"(theta_route={settings.theta_route}, "
+        f"lambda_fixed={settings.lambda_fixed})"
+    )
+
+
+@app.command("run-primary")
+def run_primary_command(
+    queries_path: Annotated[
+        Path,
+        typer.Option("--queries", exists=True, dir_okay=False, readable=True),
+    ],
+    settings_path: Annotated[
+        Path,
+        typer.Option("--settings", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    indexes_path: Annotated[
+        Path,
+        typer.Option("--indexes", exists=True, file_okay=False, readable=True),
+    ] = Path("artifacts/indexes"),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    category_stats_path: Annotated[
+        Path | None,
+        typer.Option("--category-stats", dir_okay=False, readable=True),
+    ] = None,
+    query_classifier_path: Annotated[
+        Path | None,
+        typer.Option("--query-classifier", file_okay=False, readable=True),
+    ] = Path("artifacts/classifier/final"),
+    embedding_backend: Annotated[
+        str,
+        typer.Option("--embedding-backend"),
+    ] = "sentence-transformers",
+    embedding_model_name: Annotated[
+        str | None,
+        typer.Option("--embedding-model"),
+    ] = None,
+    classifier_device: Annotated[
+        str,
+        typer.Option("--classifier-device"),
+    ] = "auto",
+) -> None:
+    """Run Phase 9 B0/B1/B2-score/P-score retrieval variants."""
+
+    config = load_indexing_config(config_path)
+    model_name = embedding_model_name or config.embedding_model
+    query_rows = load_query_rows(queries_path)
+    embedding_model = _load_embedding_model(embedding_backend, model_name)
+    embeddings_by_query_id = embed_query_rows(
+        query_rows,
+        embedding_model=embedding_model,
+        normalize_embeddings=config.normalize_embeddings,
+    )
+    probabilities_by_query_id, probability_source = _load_query_probabilities(
+        query_rows,
+        query_classifier_path=query_classifier_path,
+        classifier_device=classifier_device,
+    )
+    settings = load_primary_run_settings(
+        settings_path,
+        category_stats_path=category_stats_path,
+    )
+    query_features = build_query_features(
+        query_rows,
+        embeddings_by_query_id=embeddings_by_query_id,
+        probabilities_by_query_id=probabilities_by_query_id,
+    )
+    result_rows = run_primary_queries(
+        query_features,
+        search_backend=FaissSearchBackend(indexes_path),
+        settings=settings,
+    )
+    write_primary_run(
+        output_dir=output_path,
+        result_rows=result_rows,
+        settings=settings,
+        run_metadata={
+            "queries_path": str(queries_path),
+            "settings_path": str(settings_path),
+            "indexes_path": str(indexes_path),
+            "config_path": str(config_path),
+            "embedding_model": model_name,
+            "normalize_embeddings": config.normalize_embeddings,
+            "probability_source": probability_source,
+        },
+    )
+    typer.echo(
+        f"Wrote Phase 9 primary retrieval results to {output_path} "
+        f"({len(query_features)} queries, 4 variants)"
+    )
+
+
+def _load_query_probabilities(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    query_classifier_path: Path | None,
+    classifier_device: str,
+) -> tuple[dict[str, dict[str, float]], str]:
+    try:
+        return probabilities_from_query_rows(query_rows), "query_jsonl"
+    except ValueError as error:
+        if query_classifier_path is None or not query_classifier_path.exists():
+            raise typer.BadParameter(
+                "query rows do not contain probabilities; provide "
+                "--query-classifier pointing to the final classifier artifact"
+            ) from error
+    classifier = FinalQueryClassifier(
+        query_classifier_path,
+        device=classifier_device,
+        progress_callback=typer.echo,
+    )
+    predictions = classifier.predict_probabilities(
+        [str(row["query"]) for row in query_rows]
+    )
+    return {
+        str(row["query_id"]): probabilities
+        for row, probabilities in zip(query_rows, predictions, strict=True)
+    }, str(query_classifier_path)
+
+
+def _retrieval_defaults_from_config(config_path: Path) -> dict[str, object]:
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    retrieval = payload.get("retrieval") or {}
+    if not isinstance(retrieval, dict):
+        raise typer.BadParameter("config retrieval section must be a mapping")
+    return {
+        "candidate_k_per_partition": int(
+            retrieval.get("candidate_k_per_partition", 50)
+        ),
+        "report_top_k": int(retrieval.get("report_top_k", 10)),
+        "generation_context_top_n": int(
+            retrieval.get("generation_context_top_n", 5)
+        ),
+        "fixed_lambda_grid": list(
+            retrieval.get(
+                "fixed_lambda_grid",
+                [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            )
+        ),
+    }
+
+
+def _load_category_stats_rows(path: Path) -> list[dict[str, object]]:
+    payload = orjson.loads(path.read_bytes())
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise typer.BadParameter("category stats must contain a rows list")
+    return [dict(row) for row in rows]
+
+
+def _parse_float_grid(value: str) -> list[float]:
+    try:
+        grid = [
+            float(item.strip())
+            for item in value.split(",")
+            if item.strip()
+        ]
+    except ValueError as error:
+        raise typer.BadParameter(f"invalid float grid: {value}") from error
+    if not grid:
+        raise typer.BadParameter("grid must contain at least one value")
+    return grid
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
+        + b"\n"
     )
 
 
