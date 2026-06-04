@@ -18,6 +18,12 @@ from .data.filtering import (
     prepare_corpus,
     write_corpus_artifacts,
 )
+from .evaluation.pool import build_query_pool, write_query_pool_artifacts
+from .evaluation.queries import (
+    load_query_validation_config,
+    validate_query_splits,
+    write_query_validation_artifacts,
+)
 from .evaluation.retrieval_analysis import (
     analyze_primary_results,
     load_chunk_lookup,
@@ -344,6 +350,92 @@ def build_indexes_command(
         f"Wrote Phase 7 indexes to {output_path} "
         f"({result.manifest['chunk_count']} chunks, "
         f"{len(result.manifest['category_indexes'])} category indexes)"
+    )
+
+
+@app.command("export-query-pool")
+def export_query_pool_command(
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ] = Path("artifacts/chunks/chunks.parquet"),
+    output_path: Annotated[Path, typer.Option("--output")] = Path(
+        "artifacts/query-pool"
+    ),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    per_category: Annotated[int, typer.Option("--per-category")] = 80,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+    preview_chars: Annotated[int, typer.Option("--preview-chars")] = 240,
+) -> None:
+    """Export a Phase 8 chunk candidate pool for query annotation."""
+
+    try:
+        validation_config = load_query_validation_config(config_path)
+        result = build_query_pool(
+            chunks_path=chunks_path,
+            primary_categories=validation_config.primary_categories,
+            per_category=per_category,
+            seed=seed,
+            preview_chars=preview_chars,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    write_query_pool_artifacts(output_path, result)
+    typer.echo(
+        f"Wrote Phase 8 query pool to {output_path} "
+        f"({result.manifest['row_count']} candidates)"
+    )
+
+
+@app.command("validate-queries")
+def validate_queries_command(
+    dev_path: Annotated[
+        Path,
+        typer.Option("--dev", exists=True, dir_okay=False, readable=True),
+    ],
+    test_path: Annotated[
+        Path,
+        typer.Option("--test", exists=True, dir_okay=False, readable=True),
+    ],
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ] = Path("artifacts/chunks/chunks.parquet"),
+    output_path: Annotated[Path, typer.Option("--output")] = Path(
+        "artifacts/query-validation"
+    ),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    non_single_tolerance: Annotated[
+        float,
+        typer.Option("--non-single-tolerance"),
+    ] = 0.05,
+) -> None:
+    """Validate Phase 8 dev/test query annotation JSONL files."""
+
+    try:
+        validation_config = load_query_validation_config(
+            config_path,
+            non_single_tolerance=non_single_tolerance,
+        )
+        report = validate_query_splits(
+            dev_path=dev_path,
+            test_path=test_path,
+            chunks_path=chunks_path,
+            config=validation_config,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    write_query_validation_artifacts(output_path, report)
+    typer.echo(
+        f"Wrote Phase 8 query validation to {output_path} "
+        f"(dev={report['splits']['dev']['row_count']}, "
+        f"test={report['splits']['test']['row_count']})"
     )
 
 
