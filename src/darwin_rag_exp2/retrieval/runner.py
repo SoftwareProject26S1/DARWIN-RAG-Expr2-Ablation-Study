@@ -11,6 +11,7 @@ import orjson
 
 from darwin_rag_exp2.evaluation.retrieval_metrics import retrieval_metrics_at_k
 
+from .routing import soft_route_categories, top1_category
 from .types import (
     PrimaryRunSettings,
     QueryFeatures,
@@ -86,12 +87,52 @@ def _result_row(
         "query_type": query.query_type,
         "gold_chunks": list(query.gold_chunks),
         "gold_categories": list(query.gold_categories),
+        "query_probabilities": dict(query.probabilities),
+        "routing": _routing_payload(query, variant_result.variant, settings),
         "metrics": metric_values,
         "top10": [_ranked_payload(row) for row in variant_result.top10],
         "top5_contexts": [
             _ranked_payload(row)
             for row in variant_result.top5_contexts
         ],
+    }
+
+
+def _routing_payload(
+    query: QueryFeatures,
+    variant: str,
+    settings: PrimaryRunSettings,
+) -> dict[str, object]:
+    top1 = top1_category(query.probabilities)
+    if variant == "B0":
+        return {
+            "mode": "unified",
+            "top1_category": top1,
+            "routed_categories": [],
+            "route_width": 0,
+        }
+    if variant == "B1":
+        return {
+            "mode": "top1",
+            "top1_category": top1,
+            "routed_categories": [top1],
+            "route_width": 1,
+        }
+
+    routed = soft_route_categories(
+        query.probabilities,
+        theta_route=settings.theta_route,
+    )
+    threshold_categories = [
+        category
+        for category, probability in query.probabilities.items()
+        if float(probability) >= settings.theta_route
+    ]
+    return {
+        "mode": "soft_threshold" if threshold_categories else "top1_fallback",
+        "top1_category": top1,
+        "routed_categories": list(routed),
+        "route_width": len(routed),
     }
 
 

@@ -18,6 +18,12 @@ from .data.filtering import (
     prepare_corpus,
     write_corpus_artifacts,
 )
+from .evaluation.retrieval_analysis import (
+    analyze_primary_results,
+    load_chunk_lookup,
+    load_primary_result_rows,
+    write_primary_analysis,
+)
 from .indexing.artifacts import build_index_artifacts, load_indexing_config
 from .indexing.embedding_artifacts import build_embedding_artifacts
 from .indexing.embeddings import HashEmbeddingModel, SentenceTransformerEmbeddingModel
@@ -585,6 +591,50 @@ def run_primary_command(
     typer.echo(
         f"Wrote Phase 9 primary retrieval results to {output_path} "
         f"({len(query_features)} queries, 4 variants)"
+    )
+
+
+@app.command("analyze-primary")
+def analyze_primary_command(
+    run_path: Annotated[
+        Path,
+        typer.Option("--run", exists=True, file_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    chunks_path: Annotated[
+        Path | None,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ] = None,
+    metric_key: Annotated[str, typer.Option("--metric")] = "ndcg@10",
+    top_failures: Annotated[int, typer.Option("--top-failures")] = 20,
+    bootstrap_samples: Annotated[
+        int,
+        typer.Option("--bootstrap-samples"),
+    ] = 1000,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+) -> None:
+    """Analyze Phase 9 primary retrieval results and write an HTML report."""
+
+    result_rows = load_primary_result_rows(run_path)
+    chunk_lookup = load_chunk_lookup(chunks_path)
+    analysis = analyze_primary_results(
+        result_rows,
+        metric_key=metric_key,
+        top_failures=top_failures,
+        chunk_lookup=chunk_lookup,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+    write_primary_analysis(
+        output_dir=output_path,
+        analysis=analysis,
+        run_dir=run_path,
+        chunks_path=chunks_path,
+    )
+    summary = analysis["summary"]
+    typer.echo(
+        f"Wrote Phase 9 retrieval analysis to {output_path} "
+        f"({summary['query_count']} queries, metric={metric_key})"
     )
 
 

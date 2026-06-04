@@ -18,6 +18,10 @@ data/annotations/
 *.faiss
 *.pt
 *.parquet
+*.tar.gz
 
 # OS files
 .DS_Store
+
+# Skills
+docs/superpowers/
