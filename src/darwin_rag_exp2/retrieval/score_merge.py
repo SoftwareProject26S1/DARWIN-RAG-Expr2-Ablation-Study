@@ -19,6 +19,7 @@ def score_merge_candidates(
     query_probabilities: Mapping[str, float],
     lambda_by_category: Mapping[str, float],
     limit: int,
+    scoring_method: str = "score_merge",
 ) -> tuple[RankedChunk, ...]:
     """Score partition hits and keep each chunk's best-scoring occurrence."""
 
@@ -47,7 +48,7 @@ def score_merge_candidates(
             similarity_norm=_metric(similarity_norm),
             query_category_probability=_metric(query_probability),
             lambda_value=_metric(lambda_value),
-            scoring_method="score_merge",
+            scoring_method=scoring_method,
         )
         previous = best_by_chunk_id.get(candidate.chunk_id)
         if previous is None or _is_better_occurrence(ranked, previous):

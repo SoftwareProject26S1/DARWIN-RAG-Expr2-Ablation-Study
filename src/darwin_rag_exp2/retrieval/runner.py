@@ -19,7 +19,12 @@ from .types import (
     SearchBackend,
     VariantResult,
 )
-from .variants import run_primary_variants
+from .variants import (
+    SEARCH_MODE_CATEGORY_SCORE_MERGE,
+    SEARCH_MODE_UNIFIED_PRIOR_RERANK,
+    SEARCH_MODES,
+    run_primary_variants,
+)
 
 
 def run_primary_queries(
@@ -27,18 +32,31 @@ def run_primary_queries(
     *,
     search_backend: SearchBackend,
     settings: PrimaryRunSettings,
+    search_mode: str = SEARCH_MODE_CATEGORY_SCORE_MERGE,
+    unified_candidate_k: int = 100,
 ) -> list[dict[str, object]]:
     """Run all primary variants for each query and return report rows."""
 
+    _validate_search_options(search_mode, unified_candidate_k)
     rows: list[dict[str, object]] = []
     for query in queries:
         variant_results = run_primary_variants(
             query,
             search_backend=search_backend,
             settings=settings,
+            search_mode=search_mode,
+            unified_candidate_k=unified_candidate_k,
         )
         for variant_result in variant_results.values():
-            rows.append(_result_row(query, variant_result, settings))
+            rows.append(
+                _result_row(
+                    query,
+                    variant_result,
+                    settings,
+                    search_mode=search_mode,
+                    unified_candidate_k=unified_candidate_k,
+                )
+            )
     return rows
 
 
@@ -74,6 +92,9 @@ def _result_row(
     query: QueryFeatures,
     variant_result: VariantResult,
     settings: PrimaryRunSettings,
+    *,
+    search_mode: str,
+    unified_candidate_k: int,
 ) -> dict[str, object]:
     metric_values = retrieval_metrics_at_k(
         ranked_chunk_ids=[row.chunk_id for row in variant_result.top10],
@@ -88,7 +109,13 @@ def _result_row(
         "gold_chunks": list(query.gold_chunks),
         "gold_categories": list(query.gold_categories),
         "query_probabilities": dict(query.probabilities),
-        "routing": _routing_payload(query, variant_result.variant, settings),
+        "routing": _routing_payload(
+            query,
+            variant_result.variant,
+            settings,
+            search_mode=search_mode,
+            unified_candidate_k=unified_candidate_k,
+        ),
         "metrics": metric_values,
         "top10": [_ranked_payload(row) for row in variant_result.top10],
         "top5_contexts": [
@@ -102,11 +129,16 @@ def _routing_payload(
     query: QueryFeatures,
     variant: str,
     settings: PrimaryRunSettings,
+    *,
+    search_mode: str,
+    unified_candidate_k: int,
 ) -> dict[str, object]:
     top1 = top1_category(query.probabilities)
     if variant == "B0":
         return {
             "mode": "unified",
+            "search_mode": search_mode,
+            "candidate_depth": settings.report_top_k,
             "top1_category": top1,
             "routed_categories": [],
             "route_width": 0,
@@ -114,9 +146,21 @@ def _routing_payload(
     if variant == "B1":
         return {
             "mode": "top1",
+            "search_mode": search_mode,
+            "candidate_depth": settings.report_top_k,
             "top1_category": top1,
             "routed_categories": [top1],
             "route_width": 1,
+        }
+
+    if search_mode == SEARCH_MODE_UNIFIED_PRIOR_RERANK:
+        return {
+            "mode": "unified_prior_rerank",
+            "search_mode": search_mode,
+            "candidate_depth": unified_candidate_k,
+            "top1_category": top1,
+            "routed_categories": [],
+            "route_width": 0,
         }
 
     routed = soft_route_categories(
@@ -130,6 +174,8 @@ def _routing_payload(
     ]
     return {
         "mode": "soft_threshold" if threshold_categories else "top1_fallback",
+        "search_mode": search_mode,
+        "candidate_depth": settings.candidate_k_per_partition,
         "top1_category": top1,
         "routed_categories": list(routed),
         "route_width": len(routed),
@@ -154,6 +200,15 @@ def _settings_payload(settings: PrimaryRunSettings) -> dict[str, object]:
         "lambda_fixed": settings.lambda_fixed,
         "lambda_by_category": dict(settings.lambda_by_category),
     }
+
+
+def _validate_search_options(search_mode: str, unified_candidate_k: int) -> None:
+    if search_mode not in SEARCH_MODES:
+        raise ValueError(
+            f"unknown search mode {search_mode!r}; expected one of {SEARCH_MODES}"
+        )
+    if unified_candidate_k <= 0:
+        raise ValueError("unified_candidate_k must be positive")
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

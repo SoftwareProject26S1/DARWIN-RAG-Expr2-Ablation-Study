@@ -74,6 +74,8 @@ def test_primary_runner_writes_variant_rows_metrics_and_manifest(tmp_path) -> No
     assert result_lines[0]["metrics"]["hit@2"] == 1.0
     assert result_lines[0]["top10"][0]["chunk_id"] == "c1"
     assert result_lines[0]["top5_contexts"][0]["chunk_id"] == "c1"
+    assert result_lines[2]["routing"]["search_mode"] == "category-score-merge"
+    assert result_lines[2]["routing"]["candidate_depth"] == 2
     assert manifest["query_count"] == 1
     assert manifest["variant_count"] == 4
     assert manifest["settings"]["theta_route"] == 0.6

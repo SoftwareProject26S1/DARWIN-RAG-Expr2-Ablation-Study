@@ -68,6 +68,38 @@ def probabilities_from_query_rows(
     return probabilities_by_query_id
 
 
+def oracle_probabilities_from_query_rows(
+    query_rows: Sequence[Mapping[str, object]],
+    *,
+    categories: Sequence[str],
+) -> dict[str, dict[str, float]]:
+    """Build diagnostic oracle probabilities from query gold categories."""
+
+    ordered_categories = tuple(dict.fromkeys(str(category) for category in categories))
+    if not ordered_categories:
+        raise ValueError("oracle probabilities require at least one known category")
+    known_categories = set(ordered_categories)
+    probabilities_by_query_id: dict[str, dict[str, float]] = {}
+    for row in query_rows:
+        query_id = str(row["query_id"])
+        gold_categories = tuple(
+            dict.fromkeys(str(category) for category in row["gold_categories"])
+        )
+        if not gold_categories:
+            raise ValueError(f"query_id {query_id!r} has no gold categories")
+        unknown = sorted(set(gold_categories).difference(known_categories))
+        if unknown:
+            raise ValueError(
+                f"query_id {query_id!r} has unknown gold categories: {unknown}"
+            )
+        oracle_probability = 1.0 / len(gold_categories)
+        probabilities_by_query_id[query_id] = {
+            category: (oracle_probability if category in gold_categories else 0.0)
+            for category in ordered_categories
+        }
+    return probabilities_by_query_id
+
+
 def build_query_features(
     query_rows: Sequence[Mapping[str, object]],
     *,

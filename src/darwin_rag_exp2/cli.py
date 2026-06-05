@@ -46,6 +46,7 @@ from .retrieval.query_features import (
     build_query_features,
     embed_query_rows,
     load_query_rows,
+    oracle_probabilities_from_query_rows,
     probabilities_from_query_rows,
 )
 from .retrieval.runner import run_primary_queries, write_primary_run
@@ -58,6 +59,7 @@ from .retrieval.tuning import (
     tune_adaptive_lambda_parameters,
     tune_primary_settings,
 )
+from .retrieval.variants import SEARCH_MODES
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -635,26 +637,45 @@ def run_primary_command(
         str,
         typer.Option("--classifier-device"),
     ] = "auto",
+    router: Annotated[
+        str,
+        typer.Option("--router"),
+    ] = "final-classifier",
+    search_mode: Annotated[
+        str,
+        typer.Option("--search-mode"),
+    ] = "category-score-merge",
+    unified_candidate_k: Annotated[
+        int,
+        typer.Option("--unified-candidate-k"),
+    ] = 100,
 ) -> None:
     """Run Phase 9 B0/B1/B2-score/P-score retrieval variants."""
 
+    _validate_run_primary_options(
+        router=router,
+        search_mode=search_mode,
+        unified_candidate_k=unified_candidate_k,
+    )
     config = load_indexing_config(config_path)
     model_name = embedding_model_name or config.embedding_model
     query_rows = load_query_rows(queries_path)
+    settings = load_primary_run_settings(
+        settings_path,
+        category_stats_path=category_stats_path,
+    )
     embedding_model = _load_embedding_model(embedding_backend, model_name)
     embeddings_by_query_id = embed_query_rows(
         query_rows,
         embedding_model=embedding_model,
         normalize_embeddings=config.normalize_embeddings,
     )
-    probabilities_by_query_id, probability_source = _load_query_probabilities(
+    probabilities_by_query_id, probability_source = _load_run_primary_probabilities(
         query_rows,
+        router=router,
         query_classifier_path=query_classifier_path,
         classifier_device=classifier_device,
-    )
-    settings = load_primary_run_settings(
-        settings_path,
-        category_stats_path=category_stats_path,
+        categories=tuple(settings.lambda_by_category),
     )
     query_features = build_query_features(
         query_rows,
@@ -665,6 +686,8 @@ def run_primary_command(
         query_features,
         search_backend=FaissSearchBackend(indexes_path),
         settings=settings,
+        search_mode=search_mode,
+        unified_candidate_k=unified_candidate_k,
     )
     write_primary_run(
         output_dir=output_path,
@@ -678,6 +701,9 @@ def run_primary_command(
             "embedding_model": model_name,
             "normalize_embeddings": config.normalize_embeddings,
             "probability_source": probability_source,
+            "router": router,
+            "search_mode": search_mode,
+            "unified_candidate_k": unified_candidate_k,
         },
     )
     typer.echo(
@@ -744,6 +770,61 @@ def _load_query_probabilities(
                 "query rows do not contain probabilities; provide "
                 "--query-classifier pointing to the final classifier artifact"
             ) from error
+    return _predict_query_probabilities(
+        query_rows,
+        query_classifier_path=query_classifier_path,
+        classifier_device=classifier_device,
+    )
+
+
+def _load_run_primary_probabilities(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    router: str,
+    query_classifier_path: Path | None,
+    classifier_device: str,
+    categories: Sequence[str],
+) -> tuple[dict[str, dict[str, float]], str]:
+    if router == "oracle":
+        try:
+            return (
+                oracle_probabilities_from_query_rows(
+                    query_rows,
+                    categories=categories,
+                ),
+                "oracle_gold_categories",
+            )
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+    if router == "precomputed":
+        try:
+            return probabilities_from_query_rows(query_rows), "query_jsonl"
+        except ValueError as error:
+            raise typer.BadParameter(
+                "query rows do not contain probabilities for --router precomputed"
+            ) from error
+    if router == "final-classifier":
+        if query_classifier_path is None or not query_classifier_path.exists():
+            raise typer.BadParameter(
+                "--router final-classifier requires --query-classifier pointing "
+                "to the final classifier artifact"
+            )
+        return _predict_query_probabilities(
+            query_rows,
+            query_classifier_path=query_classifier_path,
+            classifier_device=classifier_device,
+        )
+    raise typer.BadParameter(
+        "unknown router; expected one of: final-classifier, precomputed, oracle"
+    )
+
+
+def _predict_query_probabilities(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    query_classifier_path: Path,
+    classifier_device: str,
+) -> tuple[dict[str, dict[str, float]], str]:
     classifier = FinalQueryClassifier(
         query_classifier_path,
         device=classifier_device,
@@ -756,6 +837,24 @@ def _load_query_probabilities(
         str(row["query_id"]): probabilities
         for row, probabilities in zip(query_rows, predictions, strict=True)
     }, str(query_classifier_path)
+
+
+def _validate_run_primary_options(
+    *,
+    router: str,
+    search_mode: str,
+    unified_candidate_k: int,
+) -> None:
+    if router not in {"final-classifier", "precomputed", "oracle"}:
+        raise typer.BadParameter(
+            "unknown router; expected one of: final-classifier, precomputed, oracle"
+        )
+    if search_mode not in SEARCH_MODES:
+        raise typer.BadParameter(
+            f"unknown search mode; expected one of: {', '.join(SEARCH_MODES)}"
+        )
+    if unified_candidate_k <= 0:
+        raise typer.BadParameter("--unified-candidate-k must be positive")
 
 
 def _retrieval_defaults_from_config(config_path: Path) -> dict[str, object]:
