@@ -1,4 +1,4 @@
-"""Local MLX-LM generation adapter for API responses."""
+"""Local LLM generation adapters for API responses."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from typing import Any
 
 LoadFn = Callable[[str], tuple[Any, Any]]
 GenerateFn = Callable[..., str]
+VllmLlmFactory = Callable[..., Any]
+VllmSamplingParamsFactory = Callable[..., Any]
 
 
 class MlxLmGenerator:
@@ -73,3 +75,68 @@ class MlxLmGenerator:
                 "run with the api dependency group"
             ) from error
         return generate
+
+
+class VllmGenerator:
+    """Lazy vLLM wrapper with a small generate(prompt) surface."""
+
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        llm_factory: VllmLlmFactory | None = None,
+        sampling_params_factory: VllmSamplingParamsFactory | None = None,
+    ) -> None:
+        self.model_name = model_name
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self._llm_factory = llm_factory
+        self._sampling_params_factory = sampling_params_factory
+        self._llm = None
+
+    def generate(self, prompt: str) -> str:
+        """Generate an answer, loading the vLLM engine on first use."""
+
+        llm = self._load_llm()
+        sampling_params = self._build_sampling_params()
+        outputs = llm.generate([prompt], sampling_params)
+        return str(outputs[0].outputs[0].text).strip()
+
+    def _load_llm(self) -> Any:
+        if self._llm is None:
+            llm_factory = self._resolve_llm_factory()
+            self._llm = llm_factory(model=self.model_name)
+        return self._llm
+
+    def _build_sampling_params(self) -> Any:
+        sampling_params_factory = self._resolve_sampling_params_factory()
+        return sampling_params_factory(
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+    def _resolve_llm_factory(self) -> VllmLlmFactory:
+        if self._llm_factory is not None:
+            return self._llm_factory
+        try:
+            from vllm import LLM
+        except ImportError as error:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "vllm is required for ROCm/CUDA local LLM generation; "
+                "install the Linux API dependencies or use --platform MLX on macOS"
+            ) from error
+        return LLM
+
+    def _resolve_sampling_params_factory(self) -> VllmSamplingParamsFactory:
+        if self._sampling_params_factory is not None:
+            return self._sampling_params_factory
+        try:
+            from vllm import SamplingParams
+        except ImportError as error:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "vllm is required for ROCm/CUDA local LLM generation; "
+                "install the Linux API dependencies or use --platform MLX on macOS"
+            ) from error
+        return SamplingParams

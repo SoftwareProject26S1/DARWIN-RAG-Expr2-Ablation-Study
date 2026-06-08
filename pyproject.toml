@@ -20,8 +20,9 @@ darwin-exp2 = "darwin_rag_exp2.cli:main"
 [dependency-groups]
 api = [
     "fastapi>=0.115",
-    "mlx-lm>=0.20",
+    "mlx-lm>=0.20; sys_platform == 'darwin'",
     "uvicorn[standard]>=0.32",
+    "vllm>=0.14; sys_platform == 'linux'",
 ]
 classifier = [
     "scikit-learn>=1.5",
@@ -48,3 +49,24 @@ packages = ["src/darwin_rag_exp2"]
 addopts = "-q"
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+torch = [
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.2/torch-2.10.0%2Brocm7.2.2.lw.git23d69b29-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.2/torchaudio-2.10.0%2Brocm7.2.2.git5047768f-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.2/torchvision-0.25.0%2Brocm7.2.2.git82df5f59-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
+triton = [
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.2/triton-3.6.0%2Brocm7.2.2.git4ed88892-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
+vllm = [
+    { index = "vllm-rocm", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "vllm-rocm"
+url = "https://wheels.vllm.ai/rocm/"

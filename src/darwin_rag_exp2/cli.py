@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -760,9 +761,23 @@ def analyze_primary_command(
 def serve_api_command(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port")] = 5070,
+    platform: Annotated[
+        str | None,
+        typer.Option(
+            "--platform",
+            help="LLM runtime platform: MLX, ROCm, or CUDA. ROCm/CUDA use vLLM.",
+        ),
+    ] = None,
 ) -> None:
     """Serve the REST API for one-query P-score RAG generation."""
 
+    if platform is not None:
+        from darwin_rag_exp2.api.runtime import normalize_llm_platform
+
+        try:
+            os.environ["DARWIN_EXP2_LLM_PLATFORM"] = normalize_llm_platform(platform)
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
     try:
         import uvicorn
     except ImportError as error:

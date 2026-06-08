@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import sys
 
 import yaml
 
@@ -17,8 +18,8 @@ from darwin_rag_exp2.retrieval.faiss_backend import FaissSearchBackend
 from darwin_rag_exp2.retrieval.query_classifier import FinalQueryClassifier
 from darwin_rag_exp2.retrieval.settings import load_primary_run_settings
 
-from .generator import MlxLmGenerator
-from .service import ChunkStore, MessageService
+from .generator import MlxLmGenerator, VllmGenerator
+from .service import AnswerGenerator, ChunkStore, MessageService
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class ApiRuntimeSettings:
     embedding_model: str
     normalize_embeddings: bool
     classifier_device: str
+    llm_platform: str
     llm_model: str | None
     llm_max_tokens: int
     llm_temperature: float
@@ -102,6 +104,9 @@ def load_runtime_settings(
         embedding_model=embedding_model,
         normalize_embeddings=normalize,
         classifier_device=active_env.get("DARWIN_EXP2_CLASSIFIER_DEVICE", "auto"),
+        llm_platform=normalize_llm_platform(
+            active_env.get("DARWIN_EXP2_LLM_PLATFORM"),
+        ),
         llm_model=active_env.get("DARWIN_EXP2_LLM_MODEL") or None,
         llm_max_tokens=int(active_env.get("DARWIN_EXP2_LLM_MAX_TOKENS", "512")),
         llm_temperature=float(active_env.get("DARWIN_EXP2_LLM_TEMPERATURE", "0.0")),
@@ -133,13 +138,46 @@ def _build_service(settings: ApiRuntimeSettings) -> MessageService:
         search_backend=FaissSearchBackend(settings.indexes_dir),
         settings=load_primary_run_settings(settings.settings_path),
         chunk_store=ChunkStore.from_parquet(settings.chunks_path),
-        generator=MlxLmGenerator(
+        generator=_build_generator(settings),
+        normalize_embeddings=settings.normalize_embeddings,
+    )
+
+
+def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
+    if settings.llm_platform == "mlx":
+        return MlxLmGenerator(
             settings.resolve_llm_model(),
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
-        ),
-        normalize_embeddings=settings.normalize_embeddings,
+        )
+    if settings.llm_platform in {"rocm", "cuda"}:
+        return VllmGenerator(
+            settings.resolve_llm_model(),
+            max_tokens=settings.llm_max_tokens,
+            temperature=settings.llm_temperature,
+        )
+    raise ValueError("DARWIN_EXP2_LLM_PLATFORM must be one of: MLX, ROCm, CUDA")
+
+
+def normalize_llm_platform(value: str | None) -> str:
+    """Normalize user-facing generator platform names to runtime keys."""
+
+    if value is None or not value.strip():
+        return "mlx" if sys.platform == "darwin" else "rocm"
+    normalized = (
+        value.strip()
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
     )
+    if normalized in {"mlx", "macos", "darwin"}:
+        return "mlx"
+    if normalized in {"rocm", "amd", "linuxrocm"}:
+        return "rocm"
+    if normalized in {"cuda", "nvidia", "rocm(cuda)", "rocmcuda", "vllm"}:
+        return "cuda"
+    raise ValueError("supported platforms: MLX, ROCm, CUDA")
 
 
 def _resolve_classifier_dir(env: Mapping[str, str], root: Path) -> Path:
