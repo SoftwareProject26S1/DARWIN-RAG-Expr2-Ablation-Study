@@ -756,6 +756,26 @@ def analyze_primary_command(
     )
 
 
+@app.command("serve-api")
+def serve_api_command(
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 5070,
+) -> None:
+    """Serve the REST API for one-query P-score RAG generation."""
+
+    try:
+        import uvicorn
+    except ImportError as error:
+        raise typer.BadParameter(
+            "uvicorn is required; run with the api dependency group"
+        ) from error
+    uvicorn.run(
+        "darwin_rag_exp2.api.app:app",
+        host=host,
+        port=port,
+    )
+
+
 def _load_query_probabilities(
     query_rows: Sequence[dict[str, object]],
     *,

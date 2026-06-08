@@ -18,12 +18,18 @@ dependencies = [
 darwin-exp2 = "darwin_rag_exp2.cli:main"
 
 [dependency-groups]
+api = [
+    "fastapi>=0.115",
+    "mlx-lm>=0.20",
+    "uvicorn[standard]>=0.32",
+]
 classifier = [
     "scikit-learn>=1.5",
     "scipy>=1.14",
     "torch>=2.5",
 ]
 dev = [
+    "httpx>=0.27",
     "pytest>=8.3",
 ]
 indexing = [
