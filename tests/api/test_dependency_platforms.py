@@ -5,6 +5,7 @@ import tomllib
 def test_rocm_torch_family_uses_amd_official_wheels():
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     sources = project["tool"]["uv"]["sources"]
+    overrides = project["tool"]["uv"]["override-dependencies"]
 
     expected_urls = {
         "torch": "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.2/torch-2.10.0%2Brocm7.2.2.lw.git23d69b29-cp312-cp312-linux_x86_64.whl",
@@ -17,6 +18,10 @@ def test_rocm_torch_family_uses_amd_official_wheels():
         [source] = sources[package_name]
         assert source["url"] == url
         assert source["marker"] == "sys_platform == 'linux'"
+        assert (
+            f"{package_name} @ {url} ; sys_platform == 'linux'"
+            in overrides
+        )
 
 
 def test_api_group_uses_platform_specific_llm_backends():
