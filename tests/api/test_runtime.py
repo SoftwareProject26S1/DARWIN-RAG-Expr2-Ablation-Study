@@ -72,7 +72,8 @@ def test_runtime_settings_use_env_overrides(tmp_path):
     assert settings.normalize_embeddings is True
 
 
-def test_runtime_settings_default_classifier_falls_back_to_single(tmp_path):
+def test_runtime_settings_default_classifier_falls_back_to_single(tmp_path, monkeypatch):
+    from darwin_rag_exp2.api import runtime
     from darwin_rag_exp2.api.runtime import load_runtime_settings
 
     config_path = tmp_path / "configs" / "experiment.default.yaml"
@@ -85,6 +86,7 @@ def test_runtime_settings_default_classifier_falls_back_to_single(tmp_path):
                 "models:",
                 "  embedder: BAAI/bge-m3",
                 "  generator: mlx-community/Qwen3-8B-4bit",
+                "  generator_vllm: Qwen/Qwen2.5-7B-Instruct",
             ]
         ),
         encoding="utf-8",
@@ -92,10 +94,13 @@ def test_runtime_settings_default_classifier_falls_back_to_single(tmp_path):
     single_dir = tmp_path / "artifacts/classifier/single"
     single_dir.mkdir(parents=True)
 
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+
     settings = load_runtime_settings(env={}, cwd=tmp_path)
 
     assert settings.query_classifier_dir == single_dir
-    assert settings.resolve_llm_model() == "mlx-community/Qwen3-8B-4bit"
+    assert settings.llm_platform == "rocm"
+    assert settings.resolve_llm_model() == "Qwen/Qwen2.5-7B-Instruct"
     assert settings.normalize_embeddings is False
     assert settings.embedding_backend == "sentence-transformers"
 
