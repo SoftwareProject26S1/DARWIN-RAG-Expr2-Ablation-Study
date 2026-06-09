@@ -241,12 +241,25 @@
       display: grid;
       gap: 20px;
     }
+    .grid > *,
+    .kpi-strip > *,
+    .formula-grid > *,
+    .tight-kpi > *,
+    .agenda-mini > *,
+    .flow > *,
+    .next-list > *,
+    .cal-grid > *,
+    .route-grid > *,
+    .delta-grid > * {
+      min-width: 0;
+    }
     .cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
     .panel {
       position: relative;
+      min-width: 0;
       border: 1px solid var(--dash-border);
       background: color-mix(in oklch, var(--dash-panel) 92%, var(--panel-shade));
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
@@ -267,6 +280,12 @@
       letter-spacing: 0.05em;
     }
     .panel-title b { color: var(--dash-fg); font-weight: 680; }
+    .panel-title b,
+    .panel-title span {
+      min-width: 0;
+      overflow-wrap: break-word;
+    }
+    .panel-title span { text-align: right; }
     .headline {
       max-width: 1340px;
       font-size: 82px;
@@ -371,7 +390,33 @@
     .next-item h3,
     .next-item p {
       word-break: keep-all;
-      overflow-wrap: normal;
+      overflow-wrap: break-word;
+    }
+    .panel,
+    .kpi,
+    .mini-card,
+    .flow-card,
+    .next-item,
+    .formula-step,
+    .equation-box,
+    .callout,
+    .agenda-step,
+    .agenda-mini div,
+    .pipeline div,
+    .delta-card,
+    .example {
+      max-width: 100%;
+    }
+    .panel :is(p, h3, b, strong, small, span),
+    .kpi :is(span, strong, small),
+    .mini-card :is(b, p),
+    .formula-step :is(b, p),
+    .flow-card :is(h3, p),
+    .next-item :is(h3, p),
+    .callout :is(strong, p),
+    .equation-box {
+      min-width: 0;
+      overflow-wrap: break-word;
     }
     .kpi-strip {
       display: grid;
@@ -398,8 +443,9 @@
       margin-top: 18px;
       color: var(--dash-fg);
       font-family: var(--font-mono);
-      font-size: 54px;
+      font-size: 48px;
       line-height: 1;
+      letter-spacing: -0.035em;
       font-variant-numeric: tabular-nums;
     }
     .kpi.good strong { color: var(--accent); }
@@ -844,7 +890,7 @@
       margin-top: 26px;
     }
     .agenda-mini div {
-      min-height: 88px;
+      min-height: 104px;
       padding: 12px 10px;
       border: 1px solid var(--dash-border);
       background: color-mix(in oklch, var(--dash-panel) 86%, var(--panel-shade));
@@ -868,7 +914,7 @@
       margin-top: 26px;
     }
     .mini-card {
-      min-height: 136px;
+      min-height: 164px;
       padding: 18px;
       border: 1px solid var(--dash-border);
       background: var(--dash-panel);
@@ -937,7 +983,7 @@
       margin-top: 24px;
     }
     .formula-step {
-      min-height: 150px;
+      min-height: 206px;
       padding: 18px;
       border: 1px solid var(--dash-border);
       background: var(--dash-panel);
@@ -1009,7 +1055,7 @@
       padding-bottom: 44px;
     }
     .compact-next .next-item {
-      min-height: 136px;
+      min-height: 174px;
       padding: 16px 18px;
     }
     .compact-next .next-item h3 {
