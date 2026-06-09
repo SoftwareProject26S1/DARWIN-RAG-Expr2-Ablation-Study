@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import os
 from pathlib import Path
 from typing import Annotated
 
+import orjson
 import typer
 import yaml
 
@@ -17,6 +19,18 @@ from .data.filtering import (
     prepare_corpus,
     write_corpus_artifacts,
 )
+from .evaluation.pool import build_query_pool, write_query_pool_artifacts
+from .evaluation.queries import (
+    load_query_validation_config,
+    validate_query_splits,
+    write_query_validation_artifacts,
+)
+from .evaluation.retrieval_analysis import (
+    analyze_primary_results,
+    load_chunk_lookup,
+    load_primary_result_rows,
+    write_primary_analysis,
+)
 from .indexing.artifacts import build_index_artifacts, load_indexing_config
 from .indexing.embedding_artifacts import build_embedding_artifacts
 from .indexing.embeddings import HashEmbeddingModel, SentenceTransformerEmbeddingModel
@@ -27,6 +41,26 @@ from .models.classifier import (
     train_single_classifier,
 )
 from .models.crossfit import train_crossfit_classifier
+from .retrieval.faiss_backend import FaissSearchBackend
+from .retrieval.query_classifier import FinalQueryClassifier
+from .retrieval.query_features import (
+    build_query_features,
+    embed_query_rows,
+    load_query_rows,
+    oracle_probabilities_from_query_rows,
+    probabilities_from_query_rows,
+)
+from .retrieval.runner import run_primary_queries, write_primary_run
+from .retrieval.settings import (
+    build_lambda_by_category,
+    load_primary_run_settings,
+    write_primary_run_settings,
+)
+from .retrieval.tuning import (
+    tune_adaptive_lambda_parameters,
+    tune_primary_settings,
+)
+from .retrieval.variants import SEARCH_MODES
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -319,6 +353,664 @@ def build_indexes_command(
         f"Wrote Phase 7 indexes to {output_path} "
         f"({result.manifest['chunk_count']} chunks, "
         f"{len(result.manifest['category_indexes'])} category indexes)"
+    )
+
+
+@app.command("export-query-pool")
+def export_query_pool_command(
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ] = Path("artifacts/chunks/chunks.parquet"),
+    output_path: Annotated[Path, typer.Option("--output")] = Path(
+        "artifacts/query-pool"
+    ),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    per_category: Annotated[int, typer.Option("--per-category")] = 80,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+    preview_chars: Annotated[int, typer.Option("--preview-chars")] = 240,
+) -> None:
+    """Export a Phase 8 chunk candidate pool for query annotation."""
+
+    try:
+        validation_config = load_query_validation_config(config_path)
+        result = build_query_pool(
+            chunks_path=chunks_path,
+            primary_categories=validation_config.primary_categories,
+            per_category=per_category,
+            seed=seed,
+            preview_chars=preview_chars,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    write_query_pool_artifacts(output_path, result)
+    typer.echo(
+        f"Wrote Phase 8 query pool to {output_path} "
+        f"({result.manifest['row_count']} candidates)"
+    )
+
+
+@app.command("validate-queries")
+def validate_queries_command(
+    dev_path: Annotated[
+        Path,
+        typer.Option("--dev", exists=True, dir_okay=False, readable=True),
+    ],
+    test_path: Annotated[
+        Path,
+        typer.Option("--test", exists=True, dir_okay=False, readable=True),
+    ],
+    chunks_path: Annotated[
+        Path,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ] = Path("artifacts/chunks/chunks.parquet"),
+    output_path: Annotated[Path, typer.Option("--output")] = Path(
+        "artifacts/query-validation"
+    ),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    non_single_tolerance: Annotated[
+        float,
+        typer.Option("--non-single-tolerance"),
+    ] = 0.05,
+) -> None:
+    """Validate Phase 8 dev/test query annotation JSONL files."""
+
+    try:
+        validation_config = load_query_validation_config(
+            config_path,
+            non_single_tolerance=non_single_tolerance,
+        )
+        report = validate_query_splits(
+            dev_path=dev_path,
+            test_path=test_path,
+            chunks_path=chunks_path,
+            config=validation_config,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    write_query_validation_artifacts(output_path, report)
+    typer.echo(
+        f"Wrote Phase 8 query validation to {output_path} "
+        f"(dev={report['splits']['dev']['row_count']}, "
+        f"test={report['splits']['test']['row_count']})"
+    )
+
+
+@app.command("tune-primary")
+def tune_primary_command(
+    queries_path: Annotated[
+        Path,
+        typer.Option("--queries", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    indexes_path: Annotated[
+        Path,
+        typer.Option("--indexes", exists=True, file_okay=False, readable=True),
+    ] = Path("artifacts/indexes"),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    category_stats_path: Annotated[
+        Path,
+        typer.Option("--category-stats", dir_okay=False, readable=True),
+    ] = Path("artifacts/classifier/crossfit/category_stats.json"),
+    query_classifier_path: Annotated[
+        Path | None,
+        typer.Option("--query-classifier", file_okay=False, readable=True),
+    ] = Path("artifacts/classifier/final"),
+    embedding_backend: Annotated[
+        str,
+        typer.Option("--embedding-backend"),
+    ] = "sentence-transformers",
+    embedding_model_name: Annotated[
+        str | None,
+        typer.Option("--embedding-model"),
+    ] = None,
+    classifier_device: Annotated[
+        str,
+        typer.Option("--classifier-device"),
+    ] = "auto",
+    theta_grid: Annotated[
+        str,
+        typer.Option("--theta-grid"),
+    ] = "0.5,0.6,0.7,0.8,0.9",
+    fixed_lambda_grid: Annotated[
+        str | None,
+        typer.Option("--fixed-lambda-grid"),
+    ] = None,
+    adaptive_alpha: Annotated[float, typer.Option("--adaptive-alpha")] = 8.0,
+    adaptive_rho: Annotated[float, typer.Option("--adaptive-rho")] = 4.0,
+    adaptive_tau: Annotated[float, typer.Option("--adaptive-tau")] = 0.5,
+    adaptive_alpha_grid: Annotated[
+        str | None,
+        typer.Option("--adaptive-alpha-grid"),
+    ] = None,
+    adaptive_rho_grid: Annotated[
+        str | None,
+        typer.Option("--adaptive-rho-grid"),
+    ] = None,
+    adaptive_tau_grid: Annotated[
+        str | None,
+        typer.Option("--adaptive-tau-grid"),
+    ] = None,
+    metric_key: Annotated[str, typer.Option("--metric")] = "ndcg@10",
+) -> None:
+    """Tune Phase 9 primary retrieval settings on dev queries."""
+
+    if not category_stats_path.exists():
+        raise typer.BadParameter(f"missing category stats: {category_stats_path}")
+    config = load_indexing_config(config_path)
+    retrieval_defaults = _retrieval_defaults_from_config(config_path)
+    model_name = embedding_model_name or config.embedding_model
+    query_rows = load_query_rows(queries_path)
+    embedding_model = _load_embedding_model(embedding_backend, model_name)
+    embeddings_by_query_id = embed_query_rows(
+        query_rows,
+        embedding_model=embedding_model,
+        normalize_embeddings=config.normalize_embeddings,
+    )
+    probabilities_by_query_id, probability_source = _load_query_probabilities(
+        query_rows,
+        query_classifier_path=query_classifier_path,
+        classifier_device=classifier_device,
+    )
+    query_features = build_query_features(
+        query_rows,
+        embeddings_by_query_id=embeddings_by_query_id,
+        probabilities_by_query_id=probabilities_by_query_id,
+    )
+    category_stats_rows = _load_category_stats_rows(category_stats_path)
+    lambda_by_category = build_lambda_by_category(
+        category_stats_rows,
+        alpha=adaptive_alpha,
+        rho=adaptive_rho,
+        tau=adaptive_tau,
+    )
+    search_backend = FaissSearchBackend(indexes_path)
+    settings, diagnostics = tune_primary_settings(
+        query_features,
+        search_backend=search_backend,
+        candidate_k_per_partition=int(retrieval_defaults["candidate_k_per_partition"]),
+        report_top_k=int(retrieval_defaults["report_top_k"]),
+        generation_context_top_n=int(retrieval_defaults["generation_context_top_n"]),
+        theta_candidates=_parse_float_grid(theta_grid),
+        lambda_fixed_candidates=(
+            _parse_float_grid(fixed_lambda_grid)
+            if fixed_lambda_grid is not None
+            else [
+                float(value)
+                for value in retrieval_defaults["fixed_lambda_grid"]
+            ]
+        ),
+        lambda_by_category=lambda_by_category,
+        metric_key=metric_key,
+    )
+    settings, adaptive_diagnostics = tune_adaptive_lambda_parameters(
+        query_features,
+        search_backend=search_backend,
+        base_settings=settings,
+        category_stats_rows=category_stats_rows,
+        alpha_candidates=(
+            _parse_float_grid(adaptive_alpha_grid)
+            if adaptive_alpha_grid is not None
+            else [adaptive_alpha]
+        ),
+        rho_candidates=(
+            _parse_float_grid(adaptive_rho_grid)
+            if adaptive_rho_grid is not None
+            else [adaptive_rho]
+        ),
+        tau_candidates=(
+            _parse_float_grid(adaptive_tau_grid)
+            if adaptive_tau_grid is not None
+            else [adaptive_tau]
+        ),
+        metric_key=metric_key,
+    )
+    diagnostics = {
+        **diagnostics,
+        "query_count": len(query_features),
+        "probability_source": probability_source,
+        "adaptive_lambda": adaptive_diagnostics["best_parameters"],
+        "p_score_tuning": adaptive_diagnostics,
+    }
+    write_primary_run_settings(
+        output_path / "frozen.yaml",
+        candidate_k_per_partition=settings.candidate_k_per_partition,
+        report_top_k=settings.report_top_k,
+        generation_context_top_n=settings.generation_context_top_n,
+        theta_route=settings.theta_route,
+        lambda_fixed=settings.lambda_fixed,
+        lambda_by_category=settings.lambda_by_category,
+        tuning_metadata=diagnostics,
+    )
+    _write_json(output_path / "tuning.json", diagnostics)
+    typer.echo(
+        f"Wrote Phase 9 primary settings to {output_path} "
+        f"(theta_route={settings.theta_route}, "
+        f"lambda_fixed={settings.lambda_fixed})"
+    )
+
+
+@app.command("run-primary")
+def run_primary_command(
+    queries_path: Annotated[
+        Path,
+        typer.Option("--queries", exists=True, dir_okay=False, readable=True),
+    ],
+    settings_path: Annotated[
+        Path,
+        typer.Option("--settings", exists=True, dir_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    indexes_path: Annotated[
+        Path,
+        typer.Option("--indexes", exists=True, file_okay=False, readable=True),
+    ] = Path("artifacts/indexes"),
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", exists=True, dir_okay=False, readable=True),
+    ] = Path("configs/experiment.default.yaml"),
+    category_stats_path: Annotated[
+        Path | None,
+        typer.Option("--category-stats", dir_okay=False, readable=True),
+    ] = None,
+    query_classifier_path: Annotated[
+        Path | None,
+        typer.Option("--query-classifier", file_okay=False, readable=True),
+    ] = Path("artifacts/classifier/final"),
+    embedding_backend: Annotated[
+        str,
+        typer.Option("--embedding-backend"),
+    ] = "sentence-transformers",
+    embedding_model_name: Annotated[
+        str | None,
+        typer.Option("--embedding-model"),
+    ] = None,
+    classifier_device: Annotated[
+        str,
+        typer.Option("--classifier-device"),
+    ] = "auto",
+    router: Annotated[
+        str,
+        typer.Option("--router"),
+    ] = "final-classifier",
+    search_mode: Annotated[
+        str,
+        typer.Option("--search-mode"),
+    ] = "category-score-merge",
+    unified_candidate_k: Annotated[
+        int,
+        typer.Option("--unified-candidate-k"),
+    ] = 100,
+) -> None:
+    """Run Phase 9 B0/B1/B2-score/P-score retrieval variants."""
+
+    _validate_run_primary_options(
+        router=router,
+        search_mode=search_mode,
+        unified_candidate_k=unified_candidate_k,
+    )
+    config = load_indexing_config(config_path)
+    model_name = embedding_model_name or config.embedding_model
+    query_rows = load_query_rows(queries_path)
+    settings = load_primary_run_settings(
+        settings_path,
+        category_stats_path=category_stats_path,
+    )
+    embedding_model = _load_embedding_model(embedding_backend, model_name)
+    embeddings_by_query_id = embed_query_rows(
+        query_rows,
+        embedding_model=embedding_model,
+        normalize_embeddings=config.normalize_embeddings,
+    )
+    probabilities_by_query_id, probability_source = _load_run_primary_probabilities(
+        query_rows,
+        router=router,
+        query_classifier_path=query_classifier_path,
+        classifier_device=classifier_device,
+        categories=tuple(settings.lambda_by_category),
+    )
+    query_features = build_query_features(
+        query_rows,
+        embeddings_by_query_id=embeddings_by_query_id,
+        probabilities_by_query_id=probabilities_by_query_id,
+    )
+    result_rows = run_primary_queries(
+        query_features,
+        search_backend=FaissSearchBackend(indexes_path),
+        settings=settings,
+        search_mode=search_mode,
+        unified_candidate_k=unified_candidate_k,
+    )
+    write_primary_run(
+        output_dir=output_path,
+        result_rows=result_rows,
+        settings=settings,
+        run_metadata={
+            "queries_path": str(queries_path),
+            "settings_path": str(settings_path),
+            "indexes_path": str(indexes_path),
+            "config_path": str(config_path),
+            "embedding_model": model_name,
+            "normalize_embeddings": config.normalize_embeddings,
+            "probability_source": probability_source,
+            "router": router,
+            "search_mode": search_mode,
+            "unified_candidate_k": unified_candidate_k,
+        },
+    )
+    typer.echo(
+        f"Wrote Phase 9 primary retrieval results to {output_path} "
+        f"({len(query_features)} queries, 4 variants)"
+    )
+
+
+@app.command("analyze-primary")
+def analyze_primary_command(
+    run_path: Annotated[
+        Path,
+        typer.Option("--run", exists=True, file_okay=False, readable=True),
+    ],
+    output_path: Annotated[Path, typer.Option("--output")],
+    chunks_path: Annotated[
+        Path | None,
+        typer.Option("--chunks", exists=True, dir_okay=False, readable=True),
+    ] = None,
+    metric_key: Annotated[str, typer.Option("--metric")] = "ndcg@10",
+    top_failures: Annotated[int, typer.Option("--top-failures")] = 20,
+    bootstrap_samples: Annotated[
+        int,
+        typer.Option("--bootstrap-samples"),
+    ] = 1000,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+) -> None:
+    """Analyze Phase 9 primary retrieval results and write an HTML report."""
+
+    result_rows = load_primary_result_rows(run_path)
+    chunk_lookup = load_chunk_lookup(chunks_path)
+    analysis = analyze_primary_results(
+        result_rows,
+        metric_key=metric_key,
+        top_failures=top_failures,
+        chunk_lookup=chunk_lookup,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+    write_primary_analysis(
+        output_dir=output_path,
+        analysis=analysis,
+        run_dir=run_path,
+        chunks_path=chunks_path,
+    )
+    summary = analysis["summary"]
+    typer.echo(
+        f"Wrote Phase 9 retrieval analysis to {output_path} "
+        f"({summary['query_count']} queries, metric={metric_key})"
+    )
+
+
+@app.command("serve-api")
+def serve_api_command(
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 5070,
+    platform: Annotated[
+        str | None,
+        typer.Option(
+            "--platform",
+            help="LLM runtime platform: MLX, ROCm, or CUDA. ROCm/CUDA use vLLM.",
+        ),
+    ] = None,
+    log_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--log-file",
+            help="Path for serve-api diagnostic logs.",
+        ),
+    ] = None,
+    log_level: Annotated[
+        str | None,
+        typer.Option(
+            "--log-level",
+            help="Python logging level for serve-api diagnostics.",
+        ),
+    ] = None,
+    capture_stdio: Annotated[
+        bool,
+        typer.Option(
+            "--capture-stdio/--no-capture-stdio",
+            help="Also copy raw stdout/stderr output to the serve-api log file.",
+        ),
+    ] = False,
+) -> None:
+    """Serve the REST API for one-query P-score RAG generation."""
+
+    if platform is not None:
+        from darwin_rag_exp2.api.runtime import normalize_llm_platform
+
+        try:
+            os.environ["DARWIN_EXP2_LLM_PLATFORM"] = normalize_llm_platform(platform)
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+    from darwin_rag_exp2.api.logging import (
+        DEFAULT_LOG_FILE,
+        DEFAULT_LOG_LEVEL,
+        ApiLoggingConfig,
+        configure_api_logging,
+    )
+
+    resolved_log_file = Path(
+        log_file
+        or os.environ.get("DARWIN_EXP2_API_LOG_FILE")
+        or DEFAULT_LOG_FILE
+    )
+    resolved_log_level = (
+        log_level
+        or os.environ.get("DARWIN_EXP2_API_LOG_LEVEL")
+        or DEFAULT_LOG_LEVEL
+    )
+    resolved_capture_stdio = capture_stdio or _env_flag(
+        os.environ.get("DARWIN_EXP2_API_CAPTURE_STDIO")
+    )
+    try:
+        configure_api_logging(
+            ApiLoggingConfig(
+                log_file=resolved_log_file,
+                level=resolved_log_level,
+                capture_stdio=resolved_capture_stdio,
+            )
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "starting serve-api host=%s port=%s platform=%s log_file=%s capture_stdio=%s",
+        host,
+        port,
+        os.environ.get("DARWIN_EXP2_LLM_PLATFORM", "auto"),
+        resolved_log_file,
+        resolved_capture_stdio,
+    )
+    try:
+        import uvicorn
+    except ImportError as error:
+        raise typer.BadParameter(
+            "uvicorn is required; run with the api dependency group"
+        ) from error
+    uvicorn.run(
+        "darwin_rag_exp2.api.app:app",
+        host=host,
+        port=port,
+        log_config=None,
+    )
+
+
+def _env_flag(value: str | None) -> bool:
+    if value is None or not value.strip():
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_query_probabilities(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    query_classifier_path: Path | None,
+    classifier_device: str,
+) -> tuple[dict[str, dict[str, float]], str]:
+    try:
+        return probabilities_from_query_rows(query_rows), "query_jsonl"
+    except ValueError as error:
+        if query_classifier_path is None or not query_classifier_path.exists():
+            raise typer.BadParameter(
+                "query rows do not contain probabilities; provide "
+                "--query-classifier pointing to the final classifier artifact"
+            ) from error
+    return _predict_query_probabilities(
+        query_rows,
+        query_classifier_path=query_classifier_path,
+        classifier_device=classifier_device,
+    )
+
+
+def _load_run_primary_probabilities(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    router: str,
+    query_classifier_path: Path | None,
+    classifier_device: str,
+    categories: Sequence[str],
+) -> tuple[dict[str, dict[str, float]], str]:
+    if router == "oracle":
+        try:
+            return (
+                oracle_probabilities_from_query_rows(
+                    query_rows,
+                    categories=categories,
+                ),
+                "oracle_gold_categories",
+            )
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+    if router == "precomputed":
+        try:
+            return probabilities_from_query_rows(query_rows), "query_jsonl"
+        except ValueError as error:
+            raise typer.BadParameter(
+                "query rows do not contain probabilities for --router precomputed"
+            ) from error
+    if router == "final-classifier":
+        if query_classifier_path is None or not query_classifier_path.exists():
+            raise typer.BadParameter(
+                "--router final-classifier requires --query-classifier pointing "
+                "to the final classifier artifact"
+            )
+        return _predict_query_probabilities(
+            query_rows,
+            query_classifier_path=query_classifier_path,
+            classifier_device=classifier_device,
+        )
+    raise typer.BadParameter(
+        "unknown router; expected one of: final-classifier, precomputed, oracle"
+    )
+
+
+def _predict_query_probabilities(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    query_classifier_path: Path,
+    classifier_device: str,
+) -> tuple[dict[str, dict[str, float]], str]:
+    classifier = FinalQueryClassifier(
+        query_classifier_path,
+        device=classifier_device,
+        progress_callback=typer.echo,
+    )
+    predictions = classifier.predict_probabilities(
+        [str(row["query"]) for row in query_rows]
+    )
+    return {
+        str(row["query_id"]): probabilities
+        for row, probabilities in zip(query_rows, predictions, strict=True)
+    }, str(query_classifier_path)
+
+
+def _validate_run_primary_options(
+    *,
+    router: str,
+    search_mode: str,
+    unified_candidate_k: int,
+) -> None:
+    if router not in {"final-classifier", "precomputed", "oracle"}:
+        raise typer.BadParameter(
+            "unknown router; expected one of: final-classifier, precomputed, oracle"
+        )
+    if search_mode not in SEARCH_MODES:
+        raise typer.BadParameter(
+            f"unknown search mode; expected one of: {', '.join(SEARCH_MODES)}"
+        )
+    if unified_candidate_k <= 0:
+        raise typer.BadParameter("--unified-candidate-k must be positive")
+
+
+def _retrieval_defaults_from_config(config_path: Path) -> dict[str, object]:
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    retrieval = payload.get("retrieval") or {}
+    if not isinstance(retrieval, dict):
+        raise typer.BadParameter("config retrieval section must be a mapping")
+    return {
+        "candidate_k_per_partition": int(
+            retrieval.get("candidate_k_per_partition", 50)
+        ),
+        "report_top_k": int(retrieval.get("report_top_k", 10)),
+        "generation_context_top_n": int(
+            retrieval.get("generation_context_top_n", 5)
+        ),
+        "fixed_lambda_grid": list(
+            retrieval.get(
+                "fixed_lambda_grid",
+                [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            )
+        ),
+    }
+
+
+def _load_category_stats_rows(path: Path) -> list[dict[str, object]]:
+    payload = orjson.loads(path.read_bytes())
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise typer.BadParameter("category stats must contain a rows list")
+    return [dict(row) for row in rows]
+
+
+def _parse_float_grid(value: str) -> list[float]:
+    try:
+        grid = [
+            float(item.strip())
+            for item in value.split(",")
+            if item.strip()
+        ]
+    except ValueError as error:
+        raise typer.BadParameter(f"invalid float grid: {value}") from error
+    if not grid:
+        raise typer.BadParameter("grid must contain at least one value")
+    return grid
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
+        + b"\n"
     )
 
 

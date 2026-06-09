@@ -1,5 +1,5 @@
 experiment:
-  name: darwin-rag-exp2
+  name: darwin-rag-exp2-mlx-local
   seed: 42
   primary_categories:
     - "채용"
@@ -41,7 +41,8 @@ retrieval:
 models:
   classifier: klue/bert-base
   embedder: BAAI/bge-m3
-  generator: mlx-community/Qwen3-8B-4bit
+  generator: Qwen/Qwen3-4B-MLX-4bit
+  generator_mlx: Qwen/Qwen3-4B-MLX-4bit
   generator_vllm: Qwen/Qwen2.5-7B-Instruct
   generator_fallback: mlx-community/Qwen2.5-7B-Instruct-4bit
 

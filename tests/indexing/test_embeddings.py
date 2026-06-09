@@ -1,5 +1,7 @@
 import math
 import json
+from types import SimpleNamespace
+import sys
 
 import numpy as np
 import pyarrow as pa
@@ -10,7 +12,11 @@ from darwin_rag_exp2.indexing.embedding_artifacts import (
     build_embedding_artifacts,
     load_embedding_artifacts,
 )
-from darwin_rag_exp2.indexing.embeddings import HashEmbeddingModel, l2_normalize
+from darwin_rag_exp2.indexing.embeddings import (
+    HashEmbeddingModel,
+    SentenceTransformerEmbeddingModel,
+    l2_normalize,
+)
 
 
 def test_l2_normalize_makes_each_vector_unit_length() -> None:
@@ -40,6 +46,24 @@ def test_hash_embedding_model_is_deterministic_and_normalized() -> None:
         round(math.sqrt(sum(value * value for value in row)), 12) == 1.0
         for row in first
     )
+
+
+def test_sentence_transformer_embedding_model_passes_device(monkeypatch) -> None:
+    calls = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name, *, device=None):
+            calls.append({"model_name": model_name, "device": device})
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    SentenceTransformerEmbeddingModel("BAAI/bge-m3", device="cuda:1")
+
+    assert calls == [{"model_name": "BAAI/bge-m3", "device": "cuda:1"}]
 
 
 def test_build_embedding_artifacts_writes_vectors_id_map_and_manifest(tmp_path) -> None:
