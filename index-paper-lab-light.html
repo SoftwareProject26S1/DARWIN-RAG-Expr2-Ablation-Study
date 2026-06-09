@@ -1106,7 +1106,15 @@
         paint();
         try { localStorage.setItem(STORE, String(idx)); } catch (_) {}
       }
+      var handledKeyEvents = typeof WeakSet === 'function' ? new WeakSet() : null;
       function onKey(e) {
+        if (handledKeyEvents) {
+          if (handledKeyEvents.has(e)) return;
+          handledKeyEvents.add(e);
+        } else {
+          if (e.__deckHandled) return;
+          e.__deckHandled = true;
+        }
         var t = e.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
         if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); go(idx + 1); }
