@@ -136,6 +136,35 @@ def test_clean_generated_answer_strips_thinking_block_and_repeated_tail():
     )
 
 
+def test_clean_generated_answer_collapses_repeated_sentence_tail():
+    from darwin_rag_exp2.api.generator import clean_generated_answer
+
+    raw_answer = (
+        "답변: 근거에 따르면 교내근로 신청 정보가 제공되지 않았습니다. "
+        "질문하신 내용에 대한 정확한 정보를 제공할 수 없습니다. "
+        "확인이 필요합니다. 확인이 필요합니다. 확인이 필요합니다. 확인이 필요합니다."
+    )
+
+    assert clean_generated_answer(raw_answer) == (
+        "답변: 근거에 따르면 교내근로 신청 정보가 제공되지 않았습니다. "
+        "질문하신 내용에 대한 정확한 정보를 제공할 수 없습니다. "
+        "확인이 필요합니다."
+    )
+
+
+def test_clean_generated_answer_collapses_repeated_word_tail():
+    from darwin_rag_exp2.api.generator import clean_generated_answer
+
+    raw_answer = (
+        "답변: 검색된 근거에 교내근로 신청 정보가 없습니다. "
+        "확인이 필요합니다 필요합니다 필요합니다 필요합니다"
+    )
+
+    assert clean_generated_answer(raw_answer) == (
+        "답변: 검색된 근거에 교내근로 신청 정보가 없습니다. 확인이 필요합니다"
+    )
+
+
 def test_vllm_generator_can_disable_qwen_thinking_mode():
     from types import SimpleNamespace
 

@@ -345,7 +345,9 @@ def clean_generated_answer(answer: object) -> str:
     marker = "최종 답변:"
     if marker in text:
         text = text.split(marker, 1)[1].strip()
-    return _remove_repeated_separator_sections(text)
+    text = _remove_repeated_separator_sections(text)
+    text = _collapse_adjacent_repeated_sentences(text)
+    return _collapse_adjacent_repeated_words(text)
 
 
 def _remove_repeated_separator_sections(text: str) -> str:
@@ -363,6 +365,41 @@ def _remove_repeated_separator_sections(text: str) -> str:
         seen.add(normalized)
         kept.append(section)
     return " --- ".join(kept).strip()
+
+
+def _collapse_adjacent_repeated_sentences(text: str) -> str:
+    sentences = re.split(r"(?<=[.!?。！？])\s+", text.strip())
+    if len(sentences) <= 1:
+        return text.strip()
+
+    kept: list[str] = []
+    previous = ""
+    for sentence in sentences:
+        normalized = re.sub(r"\s+", " ", sentence).strip()
+        if not normalized:
+            continue
+        if normalized == previous:
+            continue
+        kept.append(sentence.strip())
+        previous = normalized
+    return " ".join(kept).strip()
+
+
+def _collapse_adjacent_repeated_words(text: str) -> str:
+    tokens = text.strip().split()
+    if len(tokens) <= 1:
+        return text.strip()
+
+    kept: list[str] = []
+    previous = ""
+    for token in tokens:
+        normalized = token.strip()
+        comparable = normalized.strip(".,!?;:()[]{}\"'")
+        if comparable and comparable == previous:
+            continue
+        kept.append(normalized)
+        previous = comparable
+    return " ".join(kept).strip()
 
 
 def _filter_supported_kwargs(
