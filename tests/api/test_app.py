@@ -60,3 +60,21 @@ def test_post_api_messages_maps_blank_query_to_400():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "query must not be blank"
+
+
+def test_api_messages_allows_vite_localhost_cors_preflight():
+    from darwin_rag_exp2.api.app import create_app
+
+    client = _client(create_app(service=FakeMessageService()))
+
+    response = client.options(
+        "/api/messages",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"

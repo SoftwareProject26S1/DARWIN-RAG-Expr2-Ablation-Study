@@ -13,6 +13,8 @@ from .service import MessageService, MessageValidationError
 
 logger = logging.getLogger(__name__)
 
+LOCAL_FRONTEND_ORIGIN = "http://localhost:5173"
+
 
 class MessageRequest(BaseModel):
     query: str
@@ -24,8 +26,15 @@ class MessageResponse(BaseModel):
 
 def create_app(*, service: MessageService | None = None):
     from fastapi import FastAPI, HTTPException
+    from fastapi.middleware.cors import CORSMiddleware
 
     app = FastAPI(title="DARWIN-RAG Exp2 API")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[LOCAL_FRONTEND_ORIGIN],
+        allow_methods=["POST"],
+        allow_headers=["*"],
+    )
     app.state.message_service = service
 
     def handle_message(payload: MessageRequest) -> MessageResponse:

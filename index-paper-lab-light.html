@@ -65,15 +65,16 @@
     .deck-shell {
       position: fixed;
       inset: 0;
-      display: grid;
-      place-items: center;
+      display: block;
       overflow: hidden;
     }
     .deck-stage {
       width: 1920px;
       height: 1080px;
       background: var(--bg);
-      position: relative;
+      position: absolute;
+      left: 0;
+      top: 0;
       transform-origin: top left;
       box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
       flex-shrink: 0;
@@ -1076,19 +1077,20 @@
       var idx = 0;
 
       // ---- scale-to-fit ---------------------------------------------------
-      // The stage is 1920×1080 and positioned by .deck-shell's
-      // `display:grid;place-items:center`. We scale via transform with
-      // transform-origin:top-left, then re-center by translating to the
-      // remainder. This survives nested transforms (e.g. when the OD viewer
-      // wraps the iframe in its own scale wrapper at zoom != 100%).
+      // The stage is anchored at the shell origin. Keep centering in this
+      // single function so ordinary browsers and OD presentation mode do not
+      // fight between CSS grid alignment and JS transforms.
       function fit() {
-        var sw = window.innerWidth;
-        var sh = window.innerHeight;
+        var viewport = window.visualViewport || null;
+        var sw = viewport && viewport.width ? viewport.width : window.innerWidth;
+        var sh = viewport && viewport.height ? viewport.height : window.innerHeight;
+        var sx = viewport && isFinite(viewport.offsetLeft) ? viewport.offsetLeft : 0;
+        var sy = viewport && isFinite(viewport.offsetTop) ? viewport.offsetTop : 0;
         var pad = 32;
-        var s = Math.min((sw - pad) / 1920, (sh - pad) / 1080);
+        var s = Math.min(Math.max(1, sw - pad) / 1920, Math.max(1, sh - pad) / 1080);
         if (!isFinite(s) || s <= 0) s = 1;
-        var tx = (sw - 1920 * s) / 2;
-        var ty = (sh - 1080 * s) / 2;
+        var tx = sx + (sw - 1920 * s) / 2;
+        var ty = sy + (sh - 1080 * s) / 2;
         stage.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + s + ')';
       }
 
@@ -1144,6 +1146,10 @@
       } catch (_) {}
 
       window.addEventListener('resize', fit);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', fit);
+        window.visualViewport.addEventListener('scroll', fit);
+      }
       fit();
       paint();
       focusDeck();
