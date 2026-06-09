@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>어블레이션 실험 결과 · Paper Lab Light</title>
+  <title>DARWIN-RAG 발표 덱 · Paper Lab Light</title>
   <style>
     /* ===========================================================
        Deck framework — DO NOT EDIT the rules in this <style> block.
@@ -185,6 +185,8 @@
       position: relative;
       flex: 1;
       min-height: 100%;
+      display: flex;
+      flex-direction: column;
       padding: 54px 60px 50px;
       color: var(--dash-fg);
       background:
@@ -217,6 +219,24 @@
     }
     .topline strong { color: var(--accent); font-weight: 760; }
     .page-no { color: var(--dash-muted); }
+    .slide-content {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-evenly;
+      gap: 28px;
+      padding: 20px 0 34px;
+    }
+    .slide-content.dense {
+      justify-content: space-between;
+      gap: 20px;
+      padding-top: 16px;
+      padding-bottom: 24px;
+    }
+    .slide-content > :is(.headline, .subhead, .grid, .cal-grid, .kpi-strip, .formula-grid, .route-grid, .tight-kpi, .agenda-mini, .panel, .formula) {
+      margin-top: 0 !important;
+    }
     .grid {
       display: grid;
       gap: 20px;
@@ -283,6 +303,64 @@
       hyphens: none;
     }
     .nowrap { white-space: nowrap; }
+    .agenda-strip {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 30px;
+    }
+    .agenda-step {
+      min-height: 116px;
+      padding: 15px 14px;
+      border: 1px solid var(--dash-border);
+      background: color-mix(in oklch, var(--dash-panel) 86%, var(--panel-shade));
+    }
+    .agenda-step b {
+      display: block;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 24px;
+      line-height: 1;
+    }
+    .agenda-step span {
+      display: block;
+      margin-top: 12px;
+      color: var(--dash-fg);
+      font-size: 24px;
+      line-height: 1.18;
+      word-break: keep-all;
+    }
+    .note-list {
+      display: grid;
+      gap: 14px;
+      color: var(--dash-muted);
+      font-size: 26px;
+      line-height: 1.36;
+      word-break: keep-all;
+    }
+    .note-list b { color: var(--dash-fg); }
+    .step-list {
+      display: grid;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 24px;
+      color: var(--dash-fg);
+      font-variant-numeric: tabular-nums;
+    }
+    .step-list div {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding-bottom: 10px;
+      border-bottom: 1px solid color-mix(in oklch, var(--dash-border) 70%, transparent);
+    }
+    .step-list span { color: var(--accent); }
+    .mini-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
     .caption,
     .small-note,
     .callout strong,
@@ -745,311 +823,537 @@
       font-family: var(--font-mono);
       font-size: 24px;
     }
+    .section-kicker {
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 6px 12px;
+      border: 1px solid color-mix(in oklch, var(--accent) 65%, var(--dash-border));
+      color: var(--accent);
+      background: color-mix(in oklch, var(--accent) 10%, transparent);
+      font-family: var(--font-mono);
+      font-size: 24px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .agenda-mini {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 26px;
+    }
+    .agenda-mini div {
+      min-height: 88px;
+      padding: 12px 10px;
+      border: 1px solid var(--dash-border);
+      background: color-mix(in oklch, var(--dash-panel) 86%, var(--panel-shade));
+      color: var(--dash-fg);
+      font-size: 24px;
+      line-height: 1.15;
+      word-break: keep-all;
+    }
+    .agenda-mini b {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 24px;
+      line-height: 1;
+    }
+    .tight-kpi {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 26px;
+    }
+    .mini-card {
+      min-height: 136px;
+      padding: 18px;
+      border: 1px solid var(--dash-border);
+      background: var(--dash-panel);
+    }
+    .mini-card b {
+      display: block;
+      color: var(--dash-fg);
+      font-size: 28px;
+      line-height: 1.15;
+      word-break: keep-all;
+    }
+    .mini-card p {
+      margin-top: 12px;
+      color: var(--dash-muted);
+      font-size: 24px;
+      line-height: 1.28;
+      word-break: keep-all;
+    }
+    .pipeline {
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .pipeline div {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 12px;
+      align-items: start;
+      min-height: 54px;
+      padding: 12px 14px;
+      border: 1px solid var(--dash-border);
+      background: color-mix(in oklch, var(--dash-panel) 88%, var(--panel-shade));
+      color: var(--dash-fg);
+      font-size: 24px;
+      line-height: 1.22;
+      word-break: keep-all;
+    }
+    .pipeline span {
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-weight: 760;
+      white-space: nowrap;
+    }
+    .cal-grid {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 20px;
+      align-items: stretch;
+      margin-top: 28px;
+    }
+    .equation-box {
+      padding: 24px;
+      border: 1px solid var(--dash-border);
+      background: color-mix(in oklch, var(--dash-panel-2) 78%, var(--panel-shade));
+      color: var(--dash-fg);
+      font-family: var(--font-mono);
+      font-size: 30px;
+      line-height: 1.35;
+      font-variant-numeric: tabular-nums;
+    }
+    .equation-box strong { color: var(--accent); }
+    .formula-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 24px;
+    }
+    .formula-step {
+      min-height: 150px;
+      padding: 18px;
+      border: 1px solid var(--dash-border);
+      background: var(--dash-panel);
+    }
+    .formula-step span {
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 24px;
+      font-weight: 760;
+    }
+    .formula-step b {
+      display: block;
+      margin-top: 10px;
+      color: var(--dash-fg);
+      font-size: 27px;
+      line-height: 1.12;
+    }
+    .formula-step p {
+      margin-top: 10px;
+      color: var(--dash-muted);
+      font-size: 24px;
+      line-height: 1.2;
+      word-break: keep-all;
+    }
+    .compact-diagnostics {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 24px;
+      font-variant-numeric: tabular-nums;
+    }
+    .compact-diagnostics th,
+    .compact-diagnostics td {
+      padding: 12px 13px;
+      border-bottom: 1px solid var(--dash-border);
+      text-align: right;
+      white-space: nowrap;
+    }
+    .compact-diagnostics th:first-child,
+    .compact-diagnostics td:first-child { text-align: left; }
+    .compact-diagnostics th {
+      color: var(--dash-muted);
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .compact-diagnostics td { color: var(--dash-fg); }
+    .compact-diagnostics .lead td {
+      color: var(--accent);
+      background: color-mix(in oklch, var(--accent) 8%, transparent);
+    }
+    .conclusion-slide .screen {
+      padding: 48px 60px 96px;
+    }
+    .conclusion-slide .headline {
+      font-size: 56px;
+      line-height: 1.02;
+      max-width: 1500px;
+    }
+    .conclusion-slide .subhead {
+      max-width: 1500px;
+      margin-top: 16px;
+      font-size: 24px;
+      line-height: 1.3;
+    }
+    .next-list.compact-next {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 22px;
+      padding-bottom: 44px;
+    }
+    .compact-next .next-item {
+      min-height: 136px;
+      padding: 16px 18px;
+    }
+    .compact-next .next-item h3 {
+      margin-top: 10px;
+      font-size: 25px;
+      line-height: 1.1;
+    }
+    .compact-next .next-item p {
+      margin-top: 8px;
+      font-size: 24px;
+      line-height: 1.14;
+    }
   </style>
 </head>
 <body>
   <div class="deck-shell">
     <div class="deck-stage" id="deck-stage">
 
-      <section class="slide active" data-screen-label="01 결론">
+      <section class="slide active" data-screen-label="01 서비스와 문제">
         <div class="screen">
-          <div class="topline"><strong>DARWIN_RAG Exp2</strong><span class="page-no">01 / 11</span></div>
-          <h1 class="headline"><span class="claim-win">B0가 승리했다</span>.<br><span class="nowrap">P-score</span>는 <span class="nowrap">B2-score</span>와 <span class="accent">분리되지 않았다.</span></h1>
-          <p class="subhead">의도한 증명 경로는 B0 &lt; B1 &lt; B2 &lt; P였다. 그러나 primary run 측정 결과는 반대였다. unified retrieval은 candidate recall을 보존했고, category-aware routing은 주로 gold chunks를 잘라냈다.</p>
-          <div class="kpi-strip">
-            <div class="kpi good"><span>primary run 최고 nDCG@10</span><strong>0.4697</strong><small>B0 unified retrieval</small></div>
-            <div class="kpi bad"><span>P-score nDCG@10</span><strong>0.4325</strong><small>B2-score와 B0보다 낮음</small></div>
-            <div class="kpi warn"><span>P - B2 mean delta</span><strong>-0.0023</strong><small>240 queries 중 237개 tie</small></div>
-            <div class="kpi"><span>soft routing width &ge;2</span><strong>13.3%</strong><small>B2/P는 대부분 single-route pruning처럼 동작</small></div>
-          </div>
-          <div class="source">출처: mq4oq794-report.html, mq4opzaa-exp2-retrieval-diagnostics-presentation.html</div>
-        </div>
-      </section>
-
-      <section class="slide" data-screen-label="02 실험 구조">
-        <div class="screen">
-          <div class="topline"><strong>실험 설계</strong><span class="page-no">02 / 11</span></div>
-          <div class="grid cols-2" style="align-items:start;">
-            <div>
-              <h2 class="headline" style="font-size:64px;">예상 순위는 단조 증가였다.<br>관측 순위는 아니었다.</h2>
-              <div class="panel pad" style="margin-top:30px;">
-                <div class="caption" style="margin-bottom:18px;">예상한 제거 실험 진행</div>
-                <div class="chain"><span class="pill b0">B0</span><span class="arrow">&lt;</span><span class="pill b1">B1</span><span class="arrow">&lt;</span><span class="pill b2">B2</span><span class="arrow">&lt;</span><span class="pill p">P</span></div>
-              </div>
-              <div class="panel pad" style="margin-top:18px;">
-                <div class="caption" style="margin-bottom:18px;">관측된 primary run nDCG@10 순위</div>
-                <div class="chain"><span class="pill b0">B0</span><span class="arrow">&gt;</span><span class="pill b2">B2</span><span class="arrow">&asymp;</span><span class="pill p">P</span><span class="arrow">&gt;</span><span class="pill b1">B1</span></div>
-              </div>
+          <div class="topline"><strong>service introduction</strong><span class="page-no">01 / 12</span></div>
+          <div class="slide-content">
+            <h1 class="headline" style="margin-top:42px; font-size:70px;">DARWIN-RAG: 대학 공지사항 기반 RAG 서비스</h1>
+            <p class="subhead" style="max-width:1500px;">DARWIN-RAG는 숭실대학교 공지사항 데이터에서 사용자의 자연어 질문과 관련된 notice chunks를 검색하고, 검색된 근거를 바탕으로 답변을 생성하는 서비스다. 일반 RAG는 하나의 vector index에서 semantic similarity만으로 찾지만, 대학 공지는 category boundary가 강해 의도와 다른 notice가 상위에 올 수 있다.</p>
+            <div class="tight-kpi">
+              <div class="mini-card"><b>사용자 질문</b><p>“장학금 신청 언제까지야?”처럼 자연어로 입력된다.</p></div>
+              <div class="mini-card"><b>일반 RAG 한계</b><p>비슷한 표현이 학사, 장학, 채용 notice에 함께 등장한다.</p></div>
+              <div class="mini-card"><b>설계 방향</b><p>semantic similarity와 category signal을 함께 사용한다.</p></div>
+              <div class="mini-card"><b>서비스 출력</b><p>검색된 근거 notice를 바탕으로 답변을 생성한다.</p></div>
             </div>
-            <div class="grid cols-2">
-              <div class="flow-card"><span class="badge">B0</span><h3>unified retrieval</h3><p>전체 unified FAISS index에서 semantic similarity retrieval을 수행한다. category route를 적용하지 않으므로 candidate recall이 가장 넓다.</p></div>
-              <div class="flow-card"><span class="badge">B1</span><h3>hard routing</h3><p>predicted category top-1만 선택하고 해당 category index에서 retrieval을 수행한다. 잘못된 route는 gold chunks를 제외한다.</p></div>
-              <div class="flow-card"><span class="badge">B2-score</span><h3>soft routing</h3><p>threshold를 넘은 category를 열고 category별 top-50을 수집한 뒤 fixed lambda scoring으로 병합한다.</p></div>
-              <div class="flow-card"><span class="badge">P-score</span><h3>adaptive merge</h3><p>scoring formula에서 category별 lambda와 P(category | query)를 쓰지만, 여전히 routed candidates에 의존한다.</p></div>
-            </div>
-          </div>
-          <div class="formula">score(q,d) = lambda(category(d)) * similarity_norm(q,d) + (1 - lambda(category(d))) * P(category(d) | q)</div>
-        </div>
-      </section>
-
-      <section class="slide" data-screen-label="03 metric table">
-        <div class="screen">
-          <div class="topline"><strong>primary run · Top-10 metrics</strong><span class="page-no">03 / 11</span></div>
-          <div class="grid cols-2" style="grid-template-columns:1.2fr .8fr;">
-            <div class="panel">
-              <div class="panel-title"><b>metric table</b><span>240 queries · 960 rows</span></div>
-              <table class="data-table">
-                <thead><tr><th>variant</th><th>hit@10</th><th>mrr@10</th><th>nDCG@10</th><th>recall@10</th></tr></thead>
-                <tbody>
-                  <tr class="lead-row"><td><span class="rank-dot b0"></span>B0</td><td>0.6167</td><td>0.4378</td><td>0.4697</td><td>0.5917</td></tr>
-                  <tr><td><span class="rank-dot b1"></span>B1</td><td>0.5250</td><td>0.3880</td><td>0.4155</td><td>0.5146</td></tr>
-                  <tr><td><span class="rank-dot b2"></span>B2-score</td><td>0.5542</td><td>0.4051</td><td>0.4348</td><td>0.5417</td></tr>
-                  <tr><td><span class="rank-dot p"></span>P-score</td><td>0.5542</td><td>0.4019</td><td>0.4325</td><td>0.5417</td></tr>
-                </tbody>
-              </table>
-              <p class="small-note">B0는 보고된 모든 Top-10 metrics에서 1위다. P-score는 hit@10과 recall@10에서 B2-score와 같고, MRR과 nDCG에서는 약간 낮다.</p>
-            </div>
-            <div class="panel">
-              <div class="panel-title"><b>nDCG@10 순위 막대</b><span>최대 = B0</span></div>
-              <div class="bar-list">
-                <div class="bar-row"><span>B0</span><span class="track"><span class="fill blue" style="width:100%"></span></span><b>0.4697</b></div>
-                <div class="bar-row"><span>B2-score</span><span class="track"><span class="fill cyan" style="width:92.6%"></span></span><b>0.4348</b></div>
-                <div class="bar-row"><span>P-score</span><span class="track"><span class="fill violet" style="width:92.1%"></span></span><b>0.4325</b></div>
-                <div class="bar-row"><span>B1</span><span class="track"><span class="fill amber" style="width:88.5%"></span></span><b>0.4155</b></div>
-              </div>
-              <div class="panel-title"><b>sparkline accent</b><span>B0 → B1 → B2 → P</span></div>
-              <div class="panel pad">
-                <svg class="spark" viewBox="0 0 420 80" role="img" aria-label="variant별 nDCG 추세">
-                  <path d="M14 18 L144 58 L274 44 L404 46"></path>
-                </svg>
-                <p class="caption">곡선은 routing에서 하락하고 soft routing에서 일부 회복하지만, P-score에서는 거의 움직이지 않는다.</p>
-              </div>
+            <div class="agenda-mini">
+              <div><b>01</b>문제 배경 + 서비스</div>
+              <div><b>02</b>프론트 설계</div>
+              <div><b>03</b>Backend/RAG 구조</div>
+              <div><b>04</b>Exp1 calibration</div>
+              <div><b>05</b>Exp2 retrieval 검증</div>
+              <div><b>06</b>결론 및 개선</div>
+              <div><b>07</b>시연</div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="slide" data-screen-label="04 B0 격차">
+      <section class="slide" data-screen-label="02 프론트 설계">
         <div class="screen">
-          <div class="topline"><strong>B0 격차 분석</strong><span class="page-no">04 / 11</span></div>
-          <h2 class="headline" style="font-size:58px;">B0의 우위는 nDCG에만 국한되지 않는다.</h2>
-          <p class="subhead" style="max-width:1280px;">P-score와 비교하면 B0는 +0.0625 hit@10, +0.0359 MRR, +0.0372 nDCG, +0.0500 recall만큼 앞선다. category-aware variants는 B1에서 회복하지만 baseline gap을 닫지 못한다.</p>
-          <div class="delta-grid" style="margin-top:30px;">
-            <div class="delta-card"><h3>B0 - P hit@10</h3><strong>+0.0625</strong><p>P/B2 hit rate는 같고, 둘 다 unified retrieval보다 낮다.</p></div>
-            <div class="delta-card"><h3>B0 - P mrr@10</h3><strong>+0.0359</strong><p>P-score ranking은 첫 relevant chunk를 충분히 위로 올리지 못했다.</p></div>
-            <div class="delta-card"><h3>B0 - P nDCG@10</h3><strong>+0.0372</strong><p>의도한 winning variant를 상대로 한 primary effect size다.</p></div>
-            <div class="delta-card"><h3>B0 - P recall@10</h3><strong>+0.0500</strong><p>recall gap은 pruning 설명과 일치한다.</p></div>
-          </div>
-          <div class="panel" style="margin-top:20px;">
-            <div class="panel-title"><b>비교 대상별 B0 격차</b><span>양수 = B0 우위</span></div>
-            <table class="data-table">
-              <thead><tr><th>metric</th><th>B0 - B1</th><th>B0 - B2</th><th>B0 - P</th></tr></thead>
-              <tbody>
-                <tr><td>hit@10</td><td>+0.0917</td><td>+0.0625</td><td>+0.0625</td></tr>
-                <tr><td>mrr@10</td><td>+0.0499</td><td>+0.0327</td><td>+0.0359</td></tr>
-                <tr><td>nDCG@10</td><td>+0.0541</td><td>+0.0349</td><td>+0.0372</td></tr>
-                <tr><td>recall@10</td><td>+0.0771</td><td>+0.0500</td><td>+0.0500</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <section class="slide" data-screen-label="05 P와 B2 분포">
-        <div class="screen">
-          <div class="topline"><strong>P-score와 B2-score 비교</strong><span class="page-no">05 / 11</span></div>
-          <div class="grid cols-2" style="grid-template-columns:.82fr 1.18fr;">
-            <div>
-              <h2 class="headline" style="font-size:60px;"><span class="nowrap">P-score</span>는 <span class="nowrap">B2-score</span> 대비<br>측정 가능한 향상을 거의 추가하지 못했다.</h2>
-              <div class="kpi-strip" style="grid-template-columns:repeat(2, minmax(0, 1fr)); margin-top:30px;">
-                <div class="kpi warn compact-stat"><span>wins/ties/losses</span><strong>1/237/2</strong><small>nDCG@10 query-level delta</small></div>
-                <div class="kpi bad"><span>mean delta</span><strong>-0.0023</strong><small>P-score - B2-score</small></div>
-                <div class="kpi"><span>median delta</span><strong>0.0000</strong><small>query 전반의 이동 없음</small></div>
-                <div class="kpi"><span>Wilcoxon p</span><strong>0.7500</strong><small>유의한 분리 없음</small></div>
-              </div>
-            </div>
-            <div class="panel">
-              <div class="panel-title"><b>delta histogram</b><span>nDCG@10 · P - B2</span></div>
-              <div class="histogram">
-                <div class="hist-bar" data-label="-0.569" style="height:4px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar" data-label="" style="height:4px"></div>
-                <div class="hist-bar" data-label="" style="height:3px"></div>
-                <div class="hist-bar major" data-label="-0.001..0.056" style="height:260px"></div>
-                <div class="hist-bar" data-label="0.113" style="height:4px"></div>
-              </div>
-              <div class="hist-axis" aria-hidden="true">
-                <span>-0.569</span>
-                <span>-0.001..0.056</span>
-                <span>0.113</span>
-              </div>
-              <div class="small-note">mean delta의 95% bootstrap CI는 [-0.00784, 0.000943]이며, 측정 차이는 작고 0을 가로지른다.</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="slide" data-screen-label="06 query_type heatmap">
-        <div class="screen">
-          <div class="topline"><strong>heatmap · query_type</strong><span class="page-no">06 / 11</span></div>
-          <div class="grid cols-2" style="grid-template-columns:1.18fr .82fr;">
-            <div class="panel">
-              <div class="panel-title"><b>query_type별 nDCG@10</b><span>query_type 기준 확장 행</span></div>
-              <div class="heatmap hm-query">
-                <div class="hm-cell hm-head">query_type</div><div class="hm-cell hm-head">B0</div><div class="hm-cell hm-head">B1</div><div class="hm-cell hm-head">B2</div><div class="hm-cell hm-head">P</div>
-                <div class="hm-cell hm-label">ambiguous</div><div class="hm-cell h2">0.177</div><div class="hm-cell h2">0.183</div><div class="hm-cell h2">0.182</div><div class="hm-cell h2">0.182</div>
-                <div class="hm-cell hm-label">multi_category</div><div class="hm-cell h1">0.093</div><div class="hm-cell h0">0.023</div><div class="hm-cell h0">0.030</div><div class="hm-cell h0">0.028</div>
-                <div class="hm-cell hm-label">single_category</div><div class="hm-cell h5">0.613</div><div class="hm-cell h4">0.550</div><div class="hm-cell h5">0.576</div><div class="hm-cell h5">0.573</div>
-              </div>
-            </div>
-            <div class="grid">
-              <div class="callout"><strong>multi_category가 가장 명확한 failure segment다.</strong><p>B0는 0.093 nDCG@10에 도달하지만, primary run에서 P-score는 0.028까지 떨어진다. 이는 scoring 전에 route pruning이 gold candidates를 제거했다는 해석과 맞다.</p></div>
+          <div class="topline"><strong>frontend design</strong><span class="page-no">02 / 12</span></div>
+          <div class="slide-content">
+            <h2 class="headline" style="font-size:64px;">React로 chatbot UI와 API 연결 흐름을 구현했다.</h2>
+            <p class="subhead" style="max-width:1340px;">서비스 화면은 사용자가 질문을 입력하고, chatbot response와 이전 대화 흐름을 확인하는 인터페이스에 집중했다. 후반에는 backend API와 연결해 질문 전달과 응답 표시 구조를 구성했다.</p>
+            <div class="grid cols-2" style="margin-top:28px; grid-template-columns:1.05fr .95fr;">
               <div class="panel">
-                <div class="panel-title"><b>P와 B0 격차</b><span>nDCG@10</span></div>
-                <div class="bar-list">
-                  <div class="bar-row"><span>ambiguous</span><span class="track"><span class="fill danger" style="width:1%"></span></span><b>-0.001</b></div>
-                  <div class="bar-row"><span>multi</span><span class="track"><span class="fill danger" style="width:70%"></span></span><b>-0.065</b></div>
-                  <div class="bar-row"><span>single</span><span class="track"><span class="fill danger" style="width:46%"></span></span><b>-0.040</b></div>
+                <div class="panel-title"><b>구현한 화면 기능</b><span>React components</span></div>
+                <div class="pipeline">
+                  <div><span>01</span>질문 입력 및 전송을 위한 chat input 구현</div>
+                  <div><span>02</span>사용자 message와 chatbot response를 대화형 화면에 표시</div>
+                  <div><span>03</span>새 대화 시작과 conversation history 확인 기능 구현</div>
+                  <div><span>04</span>질문을 server로 전달하고 response를 화면에 반영하는 API flow 구성</div>
                 </div>
-                <p class="small-note">ambiguous query는 거의 tie다. multi_category와 single_category query에서 더 큰 cost가 드러난다.</p>
+              </div>
+              <div class="grid">
+                <div class="callout"><strong>학습한 부분</strong><p>React state management(useState), component structure, frontend-backend data exchange를 실제 chatbot interface 안에서 다뤘다.</p></div>
+                <div class="panel pad">
+                  <p class="caption">최종 결과가 기대만큼 완성되지는 않았지만, 실제 서비스에 가까운 질문-응답 UI와 API integration 과정을 경험한 것이 프로젝트의 frontend 성과다.</p>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="slide" data-screen-label="07 category heatmap">
+      <section class="slide" data-screen-label="03 Backend RAG 구조">
         <div class="screen">
-          <div class="topline"><strong>heatmap · category</strong><span class="page-no">07 / 11</span></div>
-          <div class="grid cols-2" style="grid-template-columns:1.32fr .68fr;">
-            <div class="panel">
-              <div class="panel-title"><b>gold category별 nDCG@10</b><span>multi_category query 확장</span></div>
-              <div class="heatmap hm-category">
-                <div class="hm-cell hm-head">gold category</div><div class="hm-cell hm-head">B0</div><div class="hm-cell hm-head">B1</div><div class="hm-cell hm-head">B2</div><div class="hm-cell hm-head">P</div>
-                <div class="hm-cell hm-label">교원채용</div><div class="hm-cell h2">0.314</div><div class="hm-cell h2">0.303</div><div class="hm-cell h2">0.303</div><div class="hm-cell h2">0.303</div>
-                <div class="hm-cell hm-label">국제교류</div><div class="hm-cell h3">0.414</div><div class="hm-cell h2">0.346</div><div class="hm-cell h2">0.346</div><div class="hm-cell h2">0.346</div>
-                <div class="hm-cell hm-label">봉사</div><div class="hm-cell h3">0.442</div><div class="hm-cell h3">0.413</div><div class="hm-cell h3">0.431</div><div class="hm-cell h3">0.431</div>
-                <div class="hm-cell hm-label">비교과·행사</div><div class="hm-cell h4">0.505</div><div class="hm-cell h2">0.373</div><div class="hm-cell h3">0.430</div><div class="hm-cell h3">0.413</div>
-                <div class="hm-cell hm-label">외국인유학생</div><div class="hm-cell h3">0.461</div><div class="hm-cell h2">0.369</div><div class="hm-cell h2">0.385</div><div class="hm-cell h2">0.383</div>
-                <div class="hm-cell hm-label">장학</div><div class="hm-cell h2">0.382</div><div class="hm-cell h2">0.382</div><div class="hm-cell h2">0.382</div><div class="hm-cell h2">0.382</div>
-                <div class="hm-cell hm-label">채용</div><div class="hm-cell h3">0.468</div><div class="hm-cell h2">0.350</div><div class="hm-cell h3">0.406</div><div class="hm-cell h3">0.403</div>
-                <div class="hm-cell hm-label">학사</div><div class="hm-cell h2">0.379</div><div class="hm-cell h2">0.378</div><div class="hm-cell h2">0.375</div><div class="hm-cell h2">0.378</div>
+          <div class="topline"><strong>backend / rag architecture</strong><span class="page-no">03 / 12</span></div>
+          <div class="slide-content">
+            <h2 class="headline" style="font-size:62px;">서비스 구조: category 기반 RAG</h2>
+            <p class="subhead" style="max-width:1380px;">대학 공지사항은 학사, 장학, 채용, 국제교류, 비교과·행사처럼 category boundary가 강하다. 그래서 “어떤 category에서 찾을 것인가”와 “그 안에서 어떤 notice chunk가 관련 있는가”를 함께 판단하도록 설계했다.</p>
+            <div class="grid cols-2" style="margin-top:28px;">
+              <div class="panel">
+                <div class="panel-title"><b>Ingestion 단계</b><span>offline indexing</span></div>
+                <div class="pipeline">
+                  <div><span>01</span>공지사항 수집 → text cleaning</div>
+                  <div><span>02</span>chunk split → embedding 생성</div>
+                  <div><span>03</span>BERT category classifier로 category signal 계산</div>
+                  <div><span>04</span>category별 FAISS index 저장</div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><b>Query 단계</b><span>online retrieval</span></div>
+                <div class="pipeline">
+                  <div><span>01</span>user question embedding 생성</div>
+                  <div><span>02</span>BERT classifier로 P(category | query) 계산</div>
+                  <div><span>03</span>관련 category index 검색 후 candidate 수집</div>
+                  <div><span>04</span>lambda scoring → final ranking → answer generation</div>
+                </div>
               </div>
             </div>
-            <div class="grid">
-              <div class="kpi bad"><span>최대 B0 - P gap</span><strong>0.092</strong><small>비교과·행사: 0.505 vs 0.413</small></div>
-              <div class="kpi warn"><span>stable category</span><strong>0.382</strong><small>장학은 모든 variants에서 동일</small></div>
-              <div class="kpi bad"><span>채용 B0 - P 격차</span><strong>0.065</strong><small>0.468 vs 0.403</small></div>
-              <div class="callout"><strong>이 heatmap은 P-score 승리 이야기가 아니다.</strong><p>category signal이 도움이 되어야 할 구간에서도 primary run은 B0가 더 유용한 candidates를 보존했음을 자주 보여준다.</p></div>
+            <div class="formula">retrieval decision = category route selection + within-category semantic ranking</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" data-screen-label="04 Exp1 Calibration">
+        <div class="screen">
+          <div class="topline"><strong>experiment 1 · bert confidence calibration</strong><span class="page-no">04 / 12</span></div>
+          <div class="slide-content">
+            <h2 class="headline" style="font-size:62px;">BERT confidence를 retrieval weight로 쓰기 전에 보정했다.</h2>
+            <div class="cal-grid">
+              <div>
+                <p class="subhead" style="max-width:760px; margin-top:0;">일반 softmax confidence는 실제 정답 가능성보다 과도하게 높게 나올 수 있다. 이 값을 그대로 category 기반 dynamic weight로 쓰면 특정 category 영향이 과하게 반영될 수 있다.</p>
+                <div class="panel pad" style="margin-top:24px;">
+                  <p class="caption"><b>Dataset</b><br>2000년대 record 1개를 제외하고, 2010년부터 2026년 5월 15일까지의 u-saint 공지사항으로 구성했다.</p>
+                </div>
+              </div>
+              <div class="grid">
+                <div class="equation-box">
+                  softmax(logit / <strong>T</strong>)<br>
+                  T &gt; 1 → probability distribution 완만화<br>
+                  optimal T = <strong>1.3919</strong>
+                </div>
+                <div class="grid cols-2">
+                  <div class="mini-card"><b>H1. Calibration effect</b><p>ECE, NLL, Brier score가 감소하면 confidence가 actual correctness와 더 잘 정렬된다.</p></div>
+                  <div class="mini-card"><b>H2. Differentiation</b><p>true-class probability 분포 차이가 유지되면 category별 confidence 특성이 남아 있다.</p></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="slide" data-screen-label="08 soft routing width">
+      <section class="slide" data-screen-label="05 Exp1 결과와 Exp2 연결">
         <div class="screen">
-          <div class="topline"><strong>soft routing width 비교</strong><span class="page-no">08 / 11</span></div>
-          <div class="route-grid">
-            <div class="panel">
-              <div class="panel-title"><b>soft routing width 분포</b><span>variant별 240 queries</span></div>
-              <div class="route-bars">
-                <div class="route-row"><span>B0</span><span class="stack"><span class="seg0" style="width:100%"></span></span><b>unified</b></div>
-                <div class="route-row"><span>B1</span><span class="stack"><span class="seg1" style="width:100%"></span></span><b>1.000</b></div>
-                <div class="route-row"><span>B2-score</span><span class="stack"><span class="seg1" style="width:86.7%"></span><span class="seg2" style="width:13.3%"></span></span><b>1.133</b></div>
-                <div class="route-row"><span>P-score</span><span class="stack"><span class="seg1" style="width:86.7%"></span><span class="seg2" style="width:13.3%"></span></span><b>1.133</b></div>
-              </div>
-              <div class="small-note"><span class="legend"><span><i style="background:var(--amber)"></i>width = 1</span><span><i style="background:var(--accent)"></i>width ≥ 2</span><span><i style="background:var(--track)"></i>unified route</span></span></div>
+          <div class="topline"><strong>experiment 1 result → experiment 2 question</strong><span class="page-no">05 / 12</span></div>
+          <div class="slide-content">
+            <h2 class="headline" style="font-size:60px;">Calibration은 성공했다. 다음 질문은 retrieval 성능이다.</h2>
+            <div class="kpi-strip" style="grid-template-columns:repeat(4, minmax(0, 1fr)); margin-top:30px;">
+              <div class="kpi good"><span>Accuracy</span><strong>0.9456</strong><small>Temperature Scaling 후에도 유지</small></div>
+              <div class="kpi good"><span>ECE</span><strong>0.0340→0.0136</strong><small>confidence alignment 개선</small></div>
+              <div class="kpi good"><span>ECE improvement</span><strong>59.95%</strong><small>Calibration effect 확인</small></div>
+              <div class="kpi"><span>Hypotheses</span><strong>H1/H2</strong><small>둘 다 성립</small></div>
             </div>
-            <div class="grid">
-              <h2 class="headline" style="font-size:58px;">soft routing은 충분히 soft하지 않았다.</h2>
-              <div class="callout"><strong>B2/P queries 중 13.3%만 multi-category routes를 열었다.</strong><p>나머지 86.7%에서 B2와 P는 retrieval scoring이 도움을 주기 전에 single-category filter처럼 동작한다.</p></div>
-              <table class="data-table panel">
-                <thead><tr><th>variant</th><th>mean width</th><th>width 1</th><th>width ≥2</th></tr></thead>
-                <tbody>
-                  <tr><td>B0</td><td>0.000</td><td>0.000</td><td>0.000</td></tr>
-                  <tr><td>B1</td><td>1.000</td><td>1.000</td><td>0.000</td></tr>
-                  <tr><td>B2-score</td><td>1.133</td><td>0.867</td><td>0.133</td></tr>
-                  <tr><td>P-score</td><td>1.133</td><td>0.867</td><td>0.133</td></tr>
-                </tbody>
-              </table>
+            <div class="grid cols-2" style="margin-top:26px;">
+              <div class="callout"><strong>NLL과 Brier score도 함께 개선됐다.</strong><p>제공된 자료에는 값이 명시되지 않았으므로 수치를 새로 만들지 않고, 개선 사실만 화면에 반영했다.</p></div>
+              <div class="panel pad">
+                <p class="caption">따라서 Exp2의 질문은 명확하다. 보정된 confidence와 category별 lambda scoring을 실제 retrieval에 적용하면 B0, B1, B2-score, P-score 중 어떤 구조가 Top-10 retrieval metrics를 개선하는가?</p>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="slide" data-screen-label="09 diagnostic runs">
+      <section class="slide" data-screen-label="06 Exp2 공식">
         <div class="screen">
-          <div class="topline"><strong>failure mode isolation</strong><span class="page-no">09 / 11</span></div>
-          <h2 class="headline" style="font-size:58px;"><span class="nowrap">oracle-router run</span>과 <span class="nowrap">unified-rerank run</span>은<br>실패를 <span class="nowrap">router error</span>와 <span class="nowrap">candidate pruning</span>으로 나눈다.</h2>
-          <div class="grid cols-3" style="margin-top:28px;">
-            <div class="panel">
-              <div class="panel-title"><b>primary run</b><span>observed run</span></div>
-              <div class="bar-list">
-                <div class="bar-row"><span>B0</span><span class="track"><span class="fill blue" style="width:100%"></span></span><b>0.4697</b></div>
-                <div class="bar-row"><span>B1</span><span class="track"><span class="fill amber" style="width:88.5%"></span></span><b>0.4155</b></div>
-                <div class="bar-row"><span>B2</span><span class="track"><span class="fill cyan" style="width:92.6%"></span></span><b>0.4348</b></div>
-                <div class="bar-row"><span>P</span><span class="track"><span class="fill violet" style="width:92.1%"></span></span><b>0.4325</b></div>
-              </div>
-              <p class="small-note">B0가 앞선다. category prior는 primary run에서 향상을 보이지 않는다.</p>
+          <div class="topline"><strong>experiment 2 · normalized global merge</strong><span class="page-no">06 / 12</span></div>
+          <div class="slide-content">
+            <h2 class="headline" style="font-size:60px;">Exp2는 category별 후보를 전역 동일 기준으로 병합한다.</h2>
+            <div class="formula-grid">
+              <div class="formula-step"><span>01</span><b>route selection</b><p>P(c|q) ≥ theta_route인 category index만 검색한다.</p></div>
+              <div class="formula-step"><span>02</span><b>candidate expansion</b><p>각 partition에서 candidate_k_per_partition = 50으로 후보를 넓게 확보한다.</p></div>
+              <div class="formula-step"><span>03</span><b>global normalization</b><p>s_norm = (sim + 1) / 2. partition별 min-max normalization은 쓰지 않는다.</p></div>
+              <div class="formula-step"><span>04</span><b>lambda scoring</b><p>lambda_c * s_norm + (1 - lambda_c) * P_calibrated(c|q)</p></div>
+              <div class="formula-step"><span>05</span><b>deduplication</b><p>같은 document가 여러 partition에서 발견되면 max score만 사용한다.</p></div>
+              <div class="formula-step"><span>06</span><b>global ranking</b><p>모든 candidate를 하나의 final score 기준으로 정렬한다.</p></div>
             </div>
-            <div class="panel">
-              <div class="panel-title"><b>oracle-router run</b><span>router error 제거</span></div>
-              <div class="bar-list">
-                <div class="bar-row"><span>B0</span><span class="track"><span class="fill blue" style="width:100%"></span></span><b>0.4697</b></div>
-                <div class="bar-row"><span>B1</span><span class="track"><span class="fill amber" style="width:94.0%"></span></span><b>0.4415</b></div>
-                <div class="bar-row"><span>B2</span><span class="track"><span class="fill cyan" style="width:95.2%"></span></span><b>0.4470</b></div>
-                <div class="bar-row"><span>P</span><span class="track"><span class="fill violet" style="width:95.0%"></span></span><b>0.4462</b></div>
-              </div>
-              <p class="small-note">oracle routing은 도움이 되지만, P는 여전히 B0보다 낮다.</p>
-            </div>
-            <div class="panel">
-              <div class="panel-title"><b>unified-rerank run</b><span>candidate pruning 제거</span></div>
-              <div class="bar-list">
-                <div class="bar-row"><span>B0</span><span class="track"><span class="fill blue" style="width:100%"></span></span><b>0.4697</b></div>
-                <div class="bar-row"><span>B1</span><span class="track"><span class="fill amber" style="width:88.5%"></span></span><b>0.4155</b></div>
-                <div class="bar-row"><span>B2</span><span class="track"><span class="fill cyan" style="width:100%"></span></span><b>0.4697</b></div>
-                <div class="bar-row"><span>P</span><span class="track"><span class="fill violet" style="width:98.9%"></span></span><b>0.4646</b></div>
-              </div>
-              <p class="small-note">candidate pruning을 제거하면 B2는 B0에 도달한다.</p>
+            <div class="panel pad" style="margin-top:24px;">
+              <p class="caption">기존 HTML의 실험2 수치와 충돌하는 새 수치는 추가하지 않았다. 이 슬라이드는 scoring pipeline의 공식 설명만 보강한다.</p>
             </div>
           </div>
         </div>
       </section>
 
-      <section class="slide" data-screen-label="10 failure cases">
+      <section class="slide" data-screen-label="07 Exp2 primary metrics">
         <div class="screen">
-          <div class="topline"><strong>failure query surface</strong><span class="page-no">10 / 11</span></div>
-          <h2 class="headline" style="font-size:56px;">상위 failure는 잘못된 <span class="nowrap">category pruning</span>과<br>같은 category 내 오답 <span class="nowrap">notice retrieval</span>을 함께 보여준다.</h2>
-          <div class="examples" style="margin-top:28px;">
-            <div class="example"><div class="meta"><span>test_q0043</span><span>gold: 채용</span></div><strong>top candidate가 채용이 아니라 학사로 routed되었다.</strong><p>query는 금융/경제 학사조교 마감일을 묻지만, top result는 수강신청 notice다.</p></div>
-            <div class="example"><div class="meta"><span>test_q0065</span><span>gold: 비교과·행사</span></div><strong>top candidate가 요청된 event track이 아니라 봉사에서 나온다.</strong><p>동계 해외 파견 query가 하계 봉사 notice를 반환한다.</p></div>
-            <div class="example"><div class="meta"><span>test_q0066</span><span>gold: 비교과·행사</span></div><strong>top candidate가 장학에서 나온다.</strong><p>군복무 정보 query가 장학 notice를 retrieval하며, scoring 전에 category mismatch가 발생했음을 시사한다.</p></div>
-            <div class="example"><div class="meta"><span>test_q0005</span><span>gold: 학사</span></div><strong>같은 category지만 다른 notice다.</strong><p>B2와 P는 모두 0점이며, 학사 안에서 다른 현장실습 notice를 반환한다.</p></div>
-            <div class="example"><div class="meta"><span>test_q0030</span><span>gold: 장학</span></div><strong>같은 넓은 category지만 학기와 주제가 다르다.</strong><p>query는 2018-2 학자금대출 특별추천을 묻지만, top result는 2018-1 국가장학금 연장이다.</p></div>
-            <div class="example"><div class="meta"><span>test_q0072</span><span>gold: 비교과·행사</span></div><strong>event retrieval이 요청 연도를 놓친다.</strong><p>query는 2021 LEGO 창업 교육 기간을 묻지만, top result는 2023 실전 취업/창업 프로그램이다.</p></div>
+          <div class="topline"><strong>primary run · Top-10 metrics</strong><span class="page-no">07 / 12</span></div>
+          <div class="slide-content dense">
+            <h2 class="headline" style="font-size:58px;"><span class="claim-win">B0가 승리했다</span>.<br>모든 Top-10 metrics에서 1위다.</h2>
+            <div class="grid cols-2" style="grid-template-columns:1.2fr .8fr; margin-top:26px;">
+              <div class="panel">
+                <div class="panel-title"><b>metric table</b><span>240 queries · 960 rows</span></div>
+                <table class="data-table">
+                  <thead><tr><th>variant</th><th>hit@10</th><th>mrr@10</th><th>nDCG@10</th><th>recall@10</th></tr></thead>
+                  <tbody>
+                    <tr class="lead-row"><td><span class="rank-dot b0"></span>B0</td><td>0.6167</td><td>0.4378</td><td>0.4697</td><td>0.5917</td></tr>
+                    <tr><td><span class="rank-dot b1"></span>B1</td><td>0.5250</td><td>0.3880</td><td>0.4155</td><td>0.5146</td></tr>
+                    <tr><td><span class="rank-dot b2"></span>B2-score</td><td>0.5542</td><td>0.4051</td><td>0.4348</td><td>0.5417</td></tr>
+                    <tr><td><span class="rank-dot p"></span>P-score</td><td>0.5542</td><td>0.4019</td><td>0.4325</td><td>0.5417</td></tr>
+                  </tbody>
+                </table>
+                <p class="small-note">P-score는 hit@10과 recall@10에서 B2-score와 같고, MRR과 nDCG에서는 약간 낮다.</p>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><b>nDCG@10 순위 막대</b><span>최대 = B0</span></div>
+                <div class="bar-list">
+                  <div class="bar-row"><span>B0</span><span class="track"><span class="fill blue" style="width:100%"></span></span><b>0.4697</b></div>
+                  <div class="bar-row"><span>B2-score</span><span class="track"><span class="fill cyan" style="width:92.6%"></span></span><b>0.4348</b></div>
+                  <div class="bar-row"><span>P-score</span><span class="track"><span class="fill violet" style="width:92.1%"></span></span><b>0.4325</b></div>
+                  <div class="bar-row"><span>B1</span><span class="track"><span class="fill amber" style="width:88.5%"></span></span><b>0.4155</b></div>
+                </div>
+                <div class="small-note">의도한 순위는 B0 &lt; B1 &lt; B2 &lt; P였지만, observed primary run은 B0 &gt; B2 ≈ P &gt; B1이다.</div>
+              </div>
+            </div>
           </div>
-          <div class="source">표시한 사례는 보고서의 low-performing query table에서 선별했다. 이 rows에서 B2와 P metrics는 0이다.</div>
         </div>
       </section>
 
-      <section class="slide" data-screen-label="11 해석">
+      <section class="slide" data-screen-label="08 P-score vs B2-score">
         <div class="screen">
-          <div class="topline"><strong>결론과 다음 설계</strong><span class="page-no">11 / 11</span></div>
-          <h2 class="headline"><span class="nowrap">category-aware retrieval</span>은 <span class="nowrap">candidate pruning</span>이 아니라<br><span class="accent nowrap">candidate expansion</span>으로 재설계해야 한다.</h2>
-          <p class="subhead">이 실험은 P-score를 winning variant로 검증하지 못했다. 대신 현재 구조가 왜 낮은 성능을 보이는지 분리해냈다. soft routing width가 좁고, ranking 전에 gold chunks가 pruned될 수 있으며, category prior는 이를 보상하기에 너무 약하다.</p>
-          <div class="next-list">
-            <div class="next-item"><span>01</span><h3>unified candidates를 먼저 구성</h3><p>unified top-K와 routed category top-K를 결합해 B0의 recall 우위가 candidate pool에 남도록 한다.</p></div>
-            <div class="next-item"><span>02</span><h3>lambda recalibration</h3><p>근접 similarity만 쓰는 weight에 의존하지 말고 validation data에서 category별 lambda를 추정한다.</p></div>
-            <div class="next-item"><span>03</span><h3>gold labels를 multi-label로 구성</h3><p>문서의 primary/secondary category와 multi-label query gold를 명시해 ambiguous evaluation noise를 줄인다.</p></div>
-            <div class="next-item"><span>04</span><h3>recall diagnostics 추가</h3><p>ranking metrics 전에 source hit, answer-bearing hit, chunk hit, route coverage를 보고한다.</p></div>
-            <div class="next-item"><span>05</span><h3>category prior와 routing 분리</h3><p>unified candidate generation 이후에만 category prior를 테스트해 prior가 signal인지 noise인지 확인한다.</p></div>
-            <div class="next-item"><span>06</span><h3>semantic reranking</h3><p>candidate expansion 뒤 cross-encoder 또는 LLM reranking으로 gold chunks를 회복한다.</p></div>
+          <div class="topline"><strong>P-score vs B2-score</strong><span class="page-no">08 / 12</span></div>
+          <div class="slide-content">
+            <div class="grid cols-2" style="grid-template-columns:.82fr 1.18fr;">
+              <div>
+                <h2 class="headline" style="font-size:58px;"><span class="nowrap">P-score</span>는 <span class="nowrap">B2-score</span> 대비<br>측정 가능한 향상을 거의 추가하지 못했다.</h2>
+                <div class="kpi-strip" style="grid-template-columns:repeat(2, minmax(0, 1fr)); margin-top:30px;">
+                  <div class="kpi warn compact-stat"><span>wins/ties/losses</span><strong>1/237/2</strong><small>nDCG@10 query-level delta</small></div>
+                  <div class="kpi bad"><span>mean delta</span><strong>-0.0023</strong><small>P-score - B2-score</small></div>
+                  <div class="kpi"><span>median delta</span><strong>0.0000</strong><small>query 전반의 이동 없음</small></div>
+                  <div class="kpi"><span>Wilcoxon p</span><strong>0.7500</strong><small>유의한 분리 없음</small></div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><b>delta histogram</b><span>nDCG@10 · P - B2</span></div>
+                <div class="histogram">
+                  <div class="hist-bar" data-label="-0.569" style="height:4px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar" data-label="" style="height:4px"></div>
+                  <div class="hist-bar" data-label="" style="height:3px"></div>
+                  <div class="hist-bar major" data-label="-0.001..0.056" style="height:260px"></div>
+                  <div class="hist-bar" data-label="0.113" style="height:4px"></div>
+                </div>
+                <div class="hist-axis" aria-hidden="true">
+                  <span>-0.569</span>
+                  <span>-0.001..0.056</span>
+                  <span>0.113</span>
+                </div>
+                <div class="small-note">mean delta의 95% bootstrap CI는 [-0.00784, 0.000943]이며, 측정 차이는 작고 0을 가로지른다.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" data-screen-label="09 heatmap breakdown">
+        <div class="screen">
+          <div class="topline"><strong>query_type / category heatmap</strong><span class="page-no">09 / 12</span></div>
+          <div class="slide-content dense">
+            <h2 class="headline" style="font-size:52px;">category-aware retrieval은 도움이 되어야 할 구간에서 오히려 gold candidates를 잃었다.</h2>
+            <div class="grid cols-2" style="grid-template-columns:.86fr 1.14fr; margin-top:22px;">
+              <div class="panel">
+                <div class="panel-title"><b>query_type별 nDCG@10</b><span>primary run</span></div>
+                <div class="heatmap hm-query">
+                  <div class="hm-cell hm-head">query_type</div><div class="hm-cell hm-head">B0</div><div class="hm-cell hm-head">B1</div><div class="hm-cell hm-head">B2</div><div class="hm-cell hm-head">P</div>
+                  <div class="hm-cell hm-label">ambiguous</div><div class="hm-cell h2">0.177</div><div class="hm-cell h2">0.183</div><div class="hm-cell h2">0.182</div><div class="hm-cell h2">0.182</div>
+                  <div class="hm-cell hm-label">multi_category</div><div class="hm-cell h1">0.093</div><div class="hm-cell h0">0.023</div><div class="hm-cell h0">0.030</div><div class="hm-cell h0">0.028</div>
+                  <div class="hm-cell hm-label">single_category</div><div class="hm-cell h5">0.613</div><div class="hm-cell h4">0.550</div><div class="hm-cell h5">0.576</div><div class="hm-cell h5">0.573</div>
+                </div>
+                <p class="small-note">multi_category에서 B0는 0.093, P-score는 0.028이다. scoring 전에 route pruning이 gold candidates를 제거했다는 해석과 맞다.</p>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><b>gold category별 nDCG@10</b><span>multi_category query 확장</span></div>
+                <div class="heatmap hm-category">
+                  <div class="hm-cell hm-head">gold category</div><div class="hm-cell hm-head">B0</div><div class="hm-cell hm-head">B1</div><div class="hm-cell hm-head">B2</div><div class="hm-cell hm-head">P</div>
+                  <div class="hm-cell hm-label">교원채용</div><div class="hm-cell h2">0.314</div><div class="hm-cell h2">0.303</div><div class="hm-cell h2">0.303</div><div class="hm-cell h2">0.303</div>
+                  <div class="hm-cell hm-label">국제교류</div><div class="hm-cell h3">0.414</div><div class="hm-cell h2">0.346</div><div class="hm-cell h2">0.346</div><div class="hm-cell h2">0.346</div>
+                  <div class="hm-cell hm-label">봉사</div><div class="hm-cell h3">0.442</div><div class="hm-cell h3">0.413</div><div class="hm-cell h3">0.431</div><div class="hm-cell h3">0.431</div>
+                  <div class="hm-cell hm-label">비교과·행사</div><div class="hm-cell h4">0.505</div><div class="hm-cell h2">0.373</div><div class="hm-cell h3">0.430</div><div class="hm-cell h3">0.413</div>
+                  <div class="hm-cell hm-label">외국인유학생</div><div class="hm-cell h3">0.461</div><div class="hm-cell h2">0.369</div><div class="hm-cell h2">0.385</div><div class="hm-cell h2">0.383</div>
+                  <div class="hm-cell hm-label">장학</div><div class="hm-cell h2">0.382</div><div class="hm-cell h2">0.382</div><div class="hm-cell h2">0.382</div><div class="hm-cell h2">0.382</div>
+                  <div class="hm-cell hm-label">채용</div><div class="hm-cell h3">0.468</div><div class="hm-cell h2">0.350</div><div class="hm-cell h3">0.406</div><div class="hm-cell h3">0.403</div>
+                  <div class="hm-cell hm-label">학사</div><div class="hm-cell h2">0.379</div><div class="hm-cell h2">0.378</div><div class="hm-cell h2">0.375</div><div class="hm-cell h2">0.378</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" data-screen-label="10 routing diagnostics">
+        <div class="screen">
+          <div class="topline"><strong>soft routing width / diagnostic runs</strong><span class="page-no">10 / 12</span></div>
+          <div class="slide-content dense">
+            <h2 class="headline" style="font-size:56px;">실패 원인은 scoring formula만이 아니라 candidate가 보존되는 방식이다.</h2>
+            <div class="grid cols-2" style="grid-template-columns:.92fr 1.08fr; margin-top:24px;">
+              <div class="panel">
+                <div class="panel-title"><b>soft routing width 분포</b><span>variant별 240 queries</span></div>
+                <div class="route-bars">
+                  <div class="route-row"><span>B0</span><span class="stack"><span class="seg0" style="width:100%"></span></span><b>unified</b></div>
+                  <div class="route-row"><span>B1</span><span class="stack"><span class="seg1" style="width:100%"></span></span><b>1.000</b></div>
+                  <div class="route-row"><span>B2-score</span><span class="stack"><span class="seg1" style="width:86.7%"></span><span class="seg2" style="width:13.3%"></span></span><b>1.133</b></div>
+                  <div class="route-row"><span>P-score</span><span class="stack"><span class="seg1" style="width:86.7%"></span><span class="seg2" style="width:13.3%"></span></span><b>1.133</b></div>
+                </div>
+                <div class="callout" style="margin:18px;"><strong>B2/P queries 중 13.3%만 multi-category routes를 열었다.</strong><p>나머지 86.7%에서는 retrieval scoring 전에 single-category filter처럼 동작한다.</p></div>
+              </div>
+              <div class="panel">
+                <div class="panel-title"><b>nDCG@10 diagnostic table</b><span>primary / oracle / unified</span></div>
+                <table class="compact-diagnostics">
+                  <thead><tr><th>run</th><th>B0</th><th>B1</th><th>B2</th><th>P</th><th>해석</th></tr></thead>
+                  <tbody>
+                    <tr class="lead"><td>primary run</td><td>0.4697</td><td>0.4155</td><td>0.4348</td><td>0.4325</td><td>B0 우위</td></tr>
+                    <tr><td>oracle-router run</td><td>0.4697</td><td>0.4415</td><td>0.4470</td><td>0.4462</td><td>router error 제거</td></tr>
+                    <tr><td>unified-rerank run</td><td>0.4697</td><td>0.4155</td><td>0.4697</td><td>0.4646</td><td>candidate pruning 제거</td></tr>
+                  </tbody>
+                </table>
+                <p class="small-note">oracle routing은 도움이 되지만 B0를 넘지 못한다. candidate pruning을 제거하면 B2는 B0에 도달하므로, 손실의 핵심은 category partition 전에 gold chunks가 빠지는 현상이다. 대표 failure는 test_q0043, test_q0065, test_q0005로 압축했다.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide conclusion-slide" data-screen-label="11 결론과 개선 방향">
+        <div class="screen">
+          <div class="topline"><strong>conclusion / next design</strong><span class="page-no">11 / 12</span></div>
+          <div class="slide-content dense">
+            <h2 class="headline"><span class="nowrap">category-aware retrieval</span>은 <span class="nowrap">candidate pruning</span>이 아니라<br><span class="accent nowrap">candidate expansion</span>으로 재설계해야 한다.</h2>
+            <p class="subhead">Exp2는 P-score를 winning variant로 검증하지 못했다. 대신 낮은 성능의 원인을 분리했다. soft routing width가 좁고, ranking 전에 gold chunks가 pruned될 수 있으며, category prior는 이를 보상하기에 너무 약하다.</p>
+            <div class="next-list compact-next">
+              <div class="next-item"><span>01</span><h3>unified candidates를 먼저 구성</h3><p>unified top-K와 routed category top-K를 결합해 B0의 recall 우위를 candidate pool에 남긴다.</p></div>
+              <div class="next-item"><span>02</span><h3>lambda recalibration</h3><p>validation data에서 category별 lambda를 다시 추정해 prior 효과를 분리한다.</p></div>
+              <div class="next-item"><span>03</span><h3>gold labels를 multi-label로 구성</h3><p>primary/secondary category와 multi-label query gold로 evaluation noise를 줄인다.</p></div>
+              <div class="next-item"><span>04</span><h3>recall diagnostics 추가</h3><p>ranking metrics 전에 source hit, answer-bearing hit, chunk hit, route coverage를 보고한다.</p></div>
+              <div class="next-item"><span>05</span><h3>category prior와 routing 분리</h3><p>unified candidate generation 이후에만 category prior가 signal인지 noise인지 확인한다.</p></div>
+              <div class="next-item"><span>06</span><h3>semantic reranking</h3><p>candidate expansion 뒤 cross-encoder 또는 LLM reranking으로 gold chunks를 회복한다.</p></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="slide" data-screen-label="12 시연">
+        <div class="screen">
+          <div class="topline"><strong>demo</strong><span class="page-no">12 / 12</span></div>
+          <div class="slide-content">
+            <h2 class="headline" style="margin-top:42px; font-size:66px;">시연은 질문 → retrieval evidence → answer flow를 보여준다.</h2>
+            <p class="subhead" style="max-width:1320px;">실험 결과를 바탕으로, 서비스 시연에서는 UI 완성도보다 “사용자 질문이 backend/RAG pipeline을 통과해 근거 notice와 답변으로 이어지는지”를 확인한다.</p>
+            <div class="grid cols-4" style="margin-top:32px;">
+              <div class="flow-card"><span class="badge">01</span><h3>자연어 질문 입력</h3><p>예: “이번 학기 장학금 신청 기간이 언제야?”</p></div>
+              <div class="flow-card"><span class="badge">02</span><h3>category signal 계산</h3><p>BERT confidence와 calibrated probability를 확인한다.</p></div>
+              <div class="flow-card"><span class="badge">03</span><h3>retrieved notice 확인</h3><p>관련 notice chunks와 source evidence를 화면에서 확인한다.</p></div>
+              <div class="flow-card"><span class="badge">04</span><h3>answer response 확인</h3><p>근거 기반 답변과 conversation history 동작을 보여준다.</p></div>
+            </div>
           </div>
         </div>
       </section>
