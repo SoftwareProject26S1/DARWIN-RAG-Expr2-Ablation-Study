@@ -42,6 +42,7 @@ models:
   classifier: klue/bert-base
   embedder: BAAI/bge-m3
   generator: mlx-community/Qwen3-8B-4bit
+  generator_vllm: Qwen/Qwen2.5-7B-Instruct
   generator_fallback: mlx-community/Qwen2.5-7B-Instruct-4bit
 
 evaluation:

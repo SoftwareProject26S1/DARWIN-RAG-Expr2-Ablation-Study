@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import sys
@@ -22,6 +23,9 @@ from .generator import MlxLmGenerator, VllmGenerator
 from .service import AnswerGenerator, ChunkStore, MessageService
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class ApiRuntimeSettings:
     """Filesystem paths and model settings used to build the default service."""
@@ -37,6 +41,11 @@ class ApiRuntimeSettings:
     classifier_device: str
     llm_platform: str
     llm_model: str | None
+    llm_tokenizer: str | None
+    llm_hf_config_path: str | None
+    llm_max_model_len: int | None
+    llm_gpu_memory_utilization: float | None
+    llm_enforce_eager: bool | None
     llm_max_tokens: int
     llm_temperature: float
 
@@ -50,10 +59,7 @@ class ApiRuntimeSettings:
             return self.llm_model
         config = _load_yaml(self.config_path)
         models = config.get("models") if isinstance(config, dict) else None
-        model_name = models.get("generator") if isinstance(models, dict) else None
-        if not isinstance(model_name, str) or not model_name.strip():
-            raise ValueError("config must define models.generator or DARWIN_EXP2_LLM_MODEL")
-        return model_name
+        return _resolve_config_llm_model(models, self.llm_platform)
 
 
 def load_runtime_settings(
@@ -108,6 +114,20 @@ def load_runtime_settings(
             active_env.get("DARWIN_EXP2_LLM_PLATFORM"),
         ),
         llm_model=active_env.get("DARWIN_EXP2_LLM_MODEL") or None,
+        llm_tokenizer=active_env.get("DARWIN_EXP2_LLM_TOKENIZER") or None,
+        llm_hf_config_path=active_env.get("DARWIN_EXP2_LLM_HF_CONFIG_PATH") or None,
+        llm_max_model_len=_parse_optional_int(
+            active_env.get("DARWIN_EXP2_LLM_MAX_MODEL_LEN"),
+            "DARWIN_EXP2_LLM_MAX_MODEL_LEN",
+        ),
+        llm_gpu_memory_utilization=_parse_optional_float(
+            active_env.get("DARWIN_EXP2_LLM_GPU_MEMORY_UTILIZATION"),
+            "DARWIN_EXP2_LLM_GPU_MEMORY_UTILIZATION",
+        ),
+        llm_enforce_eager=_parse_optional_bool(
+            active_env.get("DARWIN_EXP2_LLM_ENFORCE_EAGER"),
+            "DARWIN_EXP2_LLM_ENFORCE_EAGER",
+        ),
         llm_max_tokens=int(active_env.get("DARWIN_EXP2_LLM_MAX_TOKENS", "512")),
         llm_temperature=float(active_env.get("DARWIN_EXP2_LLM_TEMPERATURE", "0.0")),
     )
@@ -116,45 +136,123 @@ def load_runtime_settings(
 def build_default_message_service() -> MessageService:
     """Build the default service using runtime env and frozen artifacts."""
 
-    settings = load_runtime_settings()
+    logger.info("loading API runtime settings cwd=%s", Path.cwd())
+    try:
+        settings = load_runtime_settings()
+    except Exception:
+        logger.exception("API runtime settings load failed")
+        raise
+    logger.info(
+        "API runtime settings loaded config=%s indexes=%s chunks=%s settings=%s "
+        "classifier=%s embedding_backend=%s classifier_device=%s llm_platform=%s",
+        settings.config_path,
+        settings.indexes_dir,
+        settings.chunks_path,
+        settings.settings_path,
+        settings.query_classifier_dir,
+        settings.embedding_backend,
+        settings.classifier_device,
+        settings.llm_platform,
+    )
     return settings.build_service()
 
 
 def _build_service(settings: ApiRuntimeSettings) -> MessageService:
-    if settings.embedding_backend == "sentence-transformers":
-        embedding_model = SentenceTransformerEmbeddingModel(settings.embedding_model)
-    elif settings.embedding_backend == "hash":
-        embedding_model = HashEmbeddingModel()
-    else:
-        raise ValueError(
-            "DARWIN_EXP2_EMBEDDING_BACKEND must be one of: sentence-transformers, hash"
+    stage = "generator"
+    try:
+        logger.info("message service stage=%s started", stage)
+        generator = _build_generator(settings)
+        logger.info("message service stage=%s completed", stage)
+
+        stage = "generator_warm_start"
+        logger.info("message service stage=%s started", stage)
+        _warm_start_generator(settings, generator)
+        logger.info("message service stage=%s completed", stage)
+
+        stage = "embedding_model"
+        logger.info(
+            "message service stage=%s started backend=%s model=%s",
+            stage,
+            settings.embedding_backend,
+            settings.embedding_model,
         )
-    return MessageService(
-        embedding_model=embedding_model,
-        classifier=FinalQueryClassifier(
+        if settings.embedding_backend == "sentence-transformers":
+            embedding_model = SentenceTransformerEmbeddingModel(settings.embedding_model)
+        elif settings.embedding_backend == "hash":
+            embedding_model = HashEmbeddingModel()
+        else:
+            raise ValueError(
+                "DARWIN_EXP2_EMBEDDING_BACKEND must be one of: sentence-transformers, hash"
+            )
+        logger.info("message service stage=%s completed", stage)
+
+        stage = "query_classifier"
+        logger.info(
+            "message service stage=%s started path=%s device=%s",
+            stage,
+            settings.query_classifier_dir,
+            settings.classifier_device,
+        )
+        classifier = FinalQueryClassifier(
             settings.query_classifier_dir,
             device=settings.classifier_device,
-        ),
-        search_backend=FaissSearchBackend(settings.indexes_dir),
-        settings=load_primary_run_settings(settings.settings_path),
-        chunk_store=ChunkStore.from_parquet(settings.chunks_path),
-        generator=_build_generator(settings),
-        normalize_embeddings=settings.normalize_embeddings,
-    )
+        )
+        logger.info("message service stage=%s completed", stage)
+
+        stage = "faiss_backend"
+        logger.info("message service stage=%s started indexes=%s", stage, settings.indexes_dir)
+        search_backend = FaissSearchBackend(settings.indexes_dir)
+        logger.info("message service stage=%s completed", stage)
+
+        stage = "primary_settings"
+        logger.info("message service stage=%s started path=%s", stage, settings.settings_path)
+        primary_settings = load_primary_run_settings(settings.settings_path)
+        logger.info("message service stage=%s completed", stage)
+
+        stage = "chunk_store"
+        logger.info("message service stage=%s started path=%s", stage, settings.chunks_path)
+        chunk_store = ChunkStore.from_parquet(settings.chunks_path)
+        logger.info("message service stage=%s completed", stage)
+
+        return MessageService(
+            embedding_model=embedding_model,
+            classifier=classifier,
+            search_backend=search_backend,
+            settings=primary_settings,
+            chunk_store=chunk_store,
+            generator=generator,
+            normalize_embeddings=settings.normalize_embeddings,
+        )
+    except Exception:
+        logger.exception("message service construction failed stage=%s", stage)
+        raise
 
 
 def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
+    model_name = settings.resolve_llm_model()
+    logger.info(
+        "building answer generator platform=%s model=%s max_tokens=%s temperature=%s",
+        settings.llm_platform,
+        model_name,
+        settings.llm_max_tokens,
+        settings.llm_temperature,
+    )
     if settings.llm_platform == "mlx":
         return MlxLmGenerator(
-            settings.resolve_llm_model(),
+            model_name,
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
         )
     if settings.llm_platform in {"rocm", "cuda"}:
         return VllmGenerator(
-            settings.resolve_llm_model(),
+            model_name,
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
+            tokenizer=settings.llm_tokenizer,
+            hf_config_path=settings.llm_hf_config_path,
+            max_model_len=settings.llm_max_model_len,
+            gpu_memory_utilization=settings.llm_gpu_memory_utilization,
+            enforce_eager=settings.llm_enforce_eager,
         )
     raise ValueError("DARWIN_EXP2_LLM_PLATFORM must be one of: MLX, ROCm, CUDA")
 
@@ -180,6 +278,64 @@ def normalize_llm_platform(value: str | None) -> str:
     raise ValueError("supported platforms: MLX, ROCm, CUDA")
 
 
+def _warm_start_generator(
+    settings: ApiRuntimeSettings,
+    generator: AnswerGenerator,
+) -> None:
+    if settings.llm_platform not in {"rocm", "cuda"}:
+        return
+    warm_start = getattr(generator, "warm_start", None)
+    if callable(warm_start):
+        warm_start()
+
+
+def _resolve_config_llm_model(models: object, platform: str) -> str:
+    if not isinstance(models, dict):
+        raise ValueError("config must define a models mapping or DARWIN_EXP2_LLM_MODEL")
+
+    if platform == "mlx":
+        model_name = _first_model_name(models, ("generator_mlx", "generator"))
+        if model_name is None:
+            raise ValueError(
+                "config must define models.generator or DARWIN_EXP2_LLM_MODEL"
+            )
+        return model_name
+
+    model_name = _first_model_name(
+        models,
+        (f"generator_{platform}", "generator_vllm"),
+    )
+    if model_name is not None:
+        return model_name
+
+    fallback = _first_model_name(models, ("generator",))
+    if fallback is None:
+        raise ValueError(
+            "vLLM platforms require DARWIN_EXP2_LLM_MODEL, "
+            f"models.generator_{platform}, or models.generator_vllm"
+        )
+    if _looks_like_mlx_model(fallback):
+        raise ValueError(
+            "vLLM platforms cannot use the MLX generator model "
+            f"{fallback!r}; set DARWIN_EXP2_LLM_MODEL or define "
+            f"models.generator_{platform}/models.generator_vllm"
+        )
+    return fallback
+
+
+def _first_model_name(models: Mapping[object, object], keys: Sequence[str]) -> str | None:
+    for key in keys:
+        value = models.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _looks_like_mlx_model(model_name: str) -> bool:
+    normalized = model_name.strip().lower()
+    return normalized.startswith("mlx-community/") or "/mlx-" in normalized
+
+
 def _resolve_classifier_dir(env: Mapping[str, str], root: Path) -> Path:
     override = env.get("DARWIN_EXP2_QUERY_CLASSIFIER_DIR")
     if override:
@@ -197,6 +353,35 @@ def _resolve_classifier_dir(env: Mapping[str, str], root: Path) -> Path:
 def _resolve_path(value: str, root: Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else root / path
+
+
+def _parse_optional_int(value: str | None, name: str) -> int | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+
+
+def _parse_optional_float(value: str | None, name: str) -> float | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return float(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a float") from error
+
+
+def _parse_optional_bool(value: str | None, name: str) -> bool | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of: true, false, 1, 0, yes, no, on, off")
 
 
 def _load_yaml(path: Path) -> dict[str, object]:

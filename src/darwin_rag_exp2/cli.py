@@ -768,6 +768,27 @@ def serve_api_command(
             help="LLM runtime platform: MLX, ROCm, or CUDA. ROCm/CUDA use vLLM.",
         ),
     ] = None,
+    log_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--log-file",
+            help="Path for serve-api diagnostic logs.",
+        ),
+    ] = None,
+    log_level: Annotated[
+        str | None,
+        typer.Option(
+            "--log-level",
+            help="Python logging level for serve-api diagnostics.",
+        ),
+    ] = None,
+    capture_stdio: Annotated[
+        bool,
+        typer.Option(
+            "--capture-stdio/--no-capture-stdio",
+            help="Also copy raw stdout/stderr output to the serve-api log file.",
+        ),
+    ] = False,
 ) -> None:
     """Serve the REST API for one-query P-score RAG generation."""
 
@@ -778,6 +799,48 @@ def serve_api_command(
             os.environ["DARWIN_EXP2_LLM_PLATFORM"] = normalize_llm_platform(platform)
         except ValueError as error:
             raise typer.BadParameter(str(error)) from error
+    from darwin_rag_exp2.api.logging import (
+        DEFAULT_LOG_FILE,
+        DEFAULT_LOG_LEVEL,
+        ApiLoggingConfig,
+        configure_api_logging,
+    )
+
+    resolved_log_file = Path(
+        log_file
+        or os.environ.get("DARWIN_EXP2_API_LOG_FILE")
+        or DEFAULT_LOG_FILE
+    )
+    resolved_log_level = (
+        log_level
+        or os.environ.get("DARWIN_EXP2_API_LOG_LEVEL")
+        or DEFAULT_LOG_LEVEL
+    )
+    resolved_capture_stdio = capture_stdio or _env_flag(
+        os.environ.get("DARWIN_EXP2_API_CAPTURE_STDIO")
+    )
+    try:
+        configure_api_logging(
+            ApiLoggingConfig(
+                log_file=resolved_log_file,
+                level=resolved_log_level,
+                capture_stdio=resolved_capture_stdio,
+            )
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "starting serve-api host=%s port=%s platform=%s log_file=%s capture_stdio=%s",
+        host,
+        port,
+        os.environ.get("DARWIN_EXP2_LLM_PLATFORM", "auto"),
+        resolved_log_file,
+        resolved_capture_stdio,
+    )
     try:
         import uvicorn
     except ImportError as error:
@@ -788,7 +851,14 @@ def serve_api_command(
         "darwin_rag_exp2.api.app:app",
         host=host,
         port=port,
+        log_config=None,
     )
+
+
+def _env_flag(value: str | None) -> bool:
+    if value is None or not value.strip():
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_query_probabilities(

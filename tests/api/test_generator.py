@@ -88,3 +88,79 @@ def test_vllm_generator_loads_engine_lazily_and_reuses_it():
         {"temperature": 0.3, "max_tokens": 96},
         {"temperature": 0.3, "max_tokens": 96},
     ]
+
+
+def test_vllm_generator_warm_start_loads_engine_once():
+    from types import SimpleNamespace
+
+    from darwin_rag_exp2.api.generator import VllmGenerator
+
+    engine_calls = []
+
+    class FakeLlm:
+        def __init__(self, **kwargs):
+            engine_calls.append(kwargs)
+
+        def generate(self, prompts, sampling_params):
+            return [
+                SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(text="answer"),
+                    ],
+                ),
+            ]
+
+    generator = VllmGenerator(
+        "local/vllm-model",
+        llm_factory=FakeLlm,
+        sampling_params_factory=lambda **kwargs: kwargs,
+    )
+
+    generator.warm_start()
+
+    assert generator.generate("prompt") == "answer"
+    assert engine_calls == [{"model": "local/vllm-model"}]
+
+
+def test_vllm_generator_passes_optional_engine_settings():
+    from types import SimpleNamespace
+
+    from darwin_rag_exp2.api.generator import VllmGenerator
+
+    engine_calls = []
+
+    class FakeLlm:
+        def __init__(self, **kwargs):
+            engine_calls.append(kwargs)
+
+        def generate(self, prompts, sampling_params):
+            return [
+                SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(text="answer"),
+                    ],
+                ),
+            ]
+
+    generator = VllmGenerator(
+        "local/vllm-model",
+        max_model_len=2048,
+        gpu_memory_utilization=0.9,
+        enforce_eager=True,
+        tokenizer="local/tokenizer",
+        hf_config_path="local/config",
+        llm_factory=FakeLlm,
+        sampling_params_factory=lambda **kwargs: kwargs,
+    )
+
+    assert generator.generate("prompt") == "answer"
+    assert engine_calls == [
+        {
+            "model": "local/vllm-model",
+            "tokenizer": "local/tokenizer",
+            "hf_config_path": "local/config",
+            "max_model_len": 2048,
+            "gpu_memory_utilization": 0.9,
+            "enforce_eager": True,
+        }
+    ]

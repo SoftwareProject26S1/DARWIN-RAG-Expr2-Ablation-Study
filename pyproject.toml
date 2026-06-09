@@ -20,9 +20,7 @@ darwin-exp2 = "darwin_rag_exp2.cli:main"
 [dependency-groups]
 api = [
     "fastapi>=0.115",
-    "mlx-lm>=0.20; sys_platform == 'darwin'",
     "uvicorn[standard]>=0.32",
-    "vllm>=0.14; sys_platform == 'linux'",
 ]
 classifier = [
     "scikit-learn>=1.5",
@@ -36,6 +34,12 @@ dev = [
 indexing = [
     "faiss-cpu>=1.9",
     "sentence-transformers>=3.2",
+]
+llm-mlx = [
+    "mlx-lm>=0.20; sys_platform == 'darwin'",
+]
+llm-vllm = [
+    "vllm>=0.14; sys_platform == 'linux'",
 ]
 
 [build-system]

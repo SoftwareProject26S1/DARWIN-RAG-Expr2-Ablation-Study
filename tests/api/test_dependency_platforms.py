@@ -24,13 +24,19 @@ def test_rocm_torch_family_uses_amd_official_wheels():
         )
 
 
-def test_api_group_uses_platform_specific_llm_backends():
+def test_api_group_excludes_platform_specific_llm_backends():
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     api_dependencies = project["dependency-groups"]["api"]
+    llm_mlx_dependencies = project["dependency-groups"]["llm-mlx"]
+    llm_vllm_dependencies = project["dependency-groups"]["llm-vllm"]
     sources = project["tool"]["uv"]["sources"]
 
-    assert "mlx-lm>=0.20; sys_platform == 'darwin'" in api_dependencies
-    assert "vllm>=0.14; sys_platform == 'linux'" in api_dependencies
+    assert api_dependencies == [
+        "fastapi>=0.115",
+        "uvicorn[standard]>=0.32",
+    ]
+    assert "mlx-lm>=0.20; sys_platform == 'darwin'" in llm_mlx_dependencies
+    assert "vllm>=0.14; sys_platform == 'linux'" in llm_vllm_dependencies
     assert sources["vllm"] == [
         {"index": "vllm-rocm", "marker": "sys_platform == 'linux'"}
     ]
