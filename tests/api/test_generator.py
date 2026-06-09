@@ -38,6 +38,58 @@ def test_mlx_generator_loads_model_lazily_and_reuses_it():
     assert generate_calls[0]["temp"] == 0.2
 
 
+def test_mlx_generator_can_enable_qwen_thinking_mode():
+    from darwin_rag_exp2.api.generator import MlxLmGenerator
+
+    prompts = []
+
+    def fake_generate(model, tokenizer, *, prompt, max_tokens, temp):
+        prompts.append(prompt)
+        return "answer"
+
+    generator = MlxLmGenerator(
+        "Qwen/Qwen3-4B-MLX-4bit",
+        thinking_mode="think",
+        loader=lambda model_name: ("model", "tokenizer"),
+        generate_fn=fake_generate,
+    )
+
+    assert generator.generate("prompt") == "answer"
+    assert prompts == ["prompt\n\n/think"]
+
+
+def test_vllm_generator_can_disable_qwen_thinking_mode():
+    from types import SimpleNamespace
+
+    from darwin_rag_exp2.api.generator import VllmGenerator
+
+    prompts = []
+
+    class FakeLlm:
+        def __init__(self, **kwargs):
+            pass
+
+        def generate(self, prompts_arg, sampling_params):
+            prompts.extend(prompts_arg)
+            return [
+                SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(text="answer"),
+                    ],
+                ),
+            ]
+
+    generator = VllmGenerator(
+        "Qwen/Qwen3-4B",
+        thinking_mode="no_think",
+        llm_factory=FakeLlm,
+        sampling_params_factory=lambda **kwargs: kwargs,
+    )
+
+    assert generator.generate("prompt") == "answer"
+    assert prompts == ["prompt\n\n/no_think"]
+
+
 def test_vllm_generator_loads_engine_lazily_and_reuses_it():
     from types import SimpleNamespace
 

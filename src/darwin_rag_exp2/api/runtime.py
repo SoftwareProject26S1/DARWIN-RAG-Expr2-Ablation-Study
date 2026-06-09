@@ -49,6 +49,7 @@ class ApiRuntimeSettings:
     llm_enforce_eager: bool | None
     llm_max_tokens: int
     llm_temperature: float
+    llm_thinking_mode: str
 
     def build_service(self) -> MessageService:
         """Build the default service using this runtime configuration."""
@@ -135,6 +136,9 @@ def load_runtime_settings(
         ),
         llm_max_tokens=int(active_env.get("DARWIN_EXP2_LLM_MAX_TOKENS", "512")),
         llm_temperature=float(active_env.get("DARWIN_EXP2_LLM_TEMPERATURE", "0.0")),
+        llm_thinking_mode=normalize_llm_thinking_mode(
+            active_env.get("DARWIN_EXP2_LLM_THINKING_MODE"),
+        ),
     )
 
 
@@ -242,17 +246,20 @@ def _build_service(settings: ApiRuntimeSettings) -> MessageService:
 def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
     model_name = settings.resolve_llm_model()
     logger.info(
-        "building answer generator platform=%s model=%s max_tokens=%s temperature=%s",
+        "building answer generator platform=%s model=%s max_tokens=%s "
+        "temperature=%s thinking_mode=%s",
         settings.llm_platform,
         model_name,
         settings.llm_max_tokens,
         settings.llm_temperature,
+        settings.llm_thinking_mode,
     )
     if settings.llm_platform == "mlx":
         return MlxLmGenerator(
             model_name,
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
+            thinking_mode=settings.llm_thinking_mode,
         )
     if settings.llm_platform in {"rocm", "cuda"}:
         return VllmGenerator(
@@ -264,6 +271,7 @@ def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
             max_model_len=settings.llm_max_model_len,
             gpu_memory_utilization=settings.llm_gpu_memory_utilization,
             enforce_eager=settings.llm_enforce_eager,
+            thinking_mode=settings.llm_thinking_mode,
         )
     raise ValueError("DARWIN_EXP2_LLM_PLATFORM must be one of: MLX, ROCm, CUDA")
 
@@ -287,6 +295,36 @@ def normalize_llm_platform(value: str | None) -> str:
     if normalized in {"cuda", "nvidia", "rocm(cuda)", "rocmcuda", "vllm"}:
         return "cuda"
     raise ValueError("supported platforms: MLX, ROCm, CUDA")
+
+
+def normalize_llm_thinking_mode(value: str | None) -> str:
+    """Normalize Qwen3 thinking-mode prompt switches for API generation."""
+
+    if value is None or not value.strip():
+        return "no_think"
+    normalized = (
+        value.strip()
+        .lower()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+    if normalized in {"think", "thinking", "true", "1", "yes", "on"}:
+        return "think"
+    if normalized in {
+        "nothink",
+        "nonthinking",
+        "disablethinking",
+        "disabled",
+        "false",
+        "0",
+        "no",
+        "off",
+    }:
+        return "no_think"
+    if normalized in {"auto", "default", "modeldefault"}:
+        return "auto"
+    raise ValueError("DARWIN_EXP2_LLM_THINKING_MODE must be one of: think, no_think, auto")
 
 
 def _warm_start_generator(

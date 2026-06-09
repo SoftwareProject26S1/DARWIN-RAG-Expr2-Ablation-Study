@@ -36,6 +36,7 @@ def test_runtime_settings_use_env_overrides(tmp_path):
             "DARWIN_EXP2_LLM_ENFORCE_EAGER": "true",
             "DARWIN_EXP2_LLM_MAX_TOKENS": "128",
             "DARWIN_EXP2_LLM_TEMPERATURE": "0.1",
+            "DARWIN_EXP2_LLM_THINKING_MODE": "think",
         },
         cwd=tmp_path,
     )
@@ -54,6 +55,7 @@ def test_runtime_settings_use_env_overrides(tmp_path):
     assert settings.llm_enforce_eager is True
     assert settings.llm_max_tokens == 128
     assert settings.llm_temperature == 0.1
+    assert settings.llm_thinking_mode == "think"
     assert settings.embedding_model == "config/embedder"
     assert settings.embedding_device == "cuda:1"
     assert settings.classifier_device == "cuda:1"
@@ -149,8 +151,8 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
     built = []
 
     class FakeMlxGenerator:
-        def __init__(self, model_name, *, max_tokens, temperature):
-            built.append(("mlx", model_name, max_tokens, temperature))
+        def __init__(self, model_name, *, max_tokens, temperature, thinking_mode):
+            built.append(("mlx", model_name, max_tokens, temperature, thinking_mode))
 
     class FakeVllmGenerator:
         def __init__(
@@ -164,6 +166,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
             max_model_len,
             gpu_memory_utilization,
             enforce_eager,
+            thinking_mode,
         ):
             built.append(
                 (
@@ -176,6 +179,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
                     max_model_len,
                     gpu_memory_utilization,
                     enforce_eager,
+                    thinking_mode,
                 )
             )
 
@@ -200,6 +204,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
             llm_enforce_eager=True,
             llm_max_tokens=33,
             llm_temperature=0.4,
+            llm_thinking_mode="think",
         )
 
     monkeypatch.setattr(runtime, "MlxLmGenerator", FakeMlxGenerator)
@@ -209,7 +214,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
     runtime._build_generator(settings_for("cuda"))
 
     assert built == [
-        ("mlx", "local/model", 33, 0.4),
+        ("mlx", "local/model", 33, 0.4, "think"),
         (
             "vllm",
             "local/model",
@@ -220,6 +225,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
             2048,
             0.85,
             True,
+            "think",
         ),
         (
             "vllm",
@@ -231,6 +237,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
             2048,
             0.85,
             True,
+            "think",
         ),
     ]
 
@@ -288,6 +295,7 @@ def test_runtime_warm_starts_vllm_before_retrieval_components(tmp_path, monkeypa
         llm_enforce_eager=None,
         llm_max_tokens=33,
         llm_temperature=0.4,
+        llm_thinking_mode="no_think",
     )
 
     runtime._build_service(settings)
@@ -343,6 +351,7 @@ def test_runtime_passes_embedding_device_to_sentence_transformer(tmp_path, monke
         llm_enforce_eager=None,
         llm_max_tokens=33,
         llm_temperature=0.4,
+        llm_thinking_mode="no_think",
     )
 
     runtime._build_service(settings)

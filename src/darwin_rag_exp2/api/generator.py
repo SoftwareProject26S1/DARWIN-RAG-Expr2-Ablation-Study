@@ -14,6 +14,7 @@ LoadFn = Callable[[str], tuple[Any, Any]]
 GenerateFn = Callable[..., str]
 VllmLlmFactory = Callable[..., Any]
 VllmSamplingParamsFactory = Callable[..., Any]
+QWEN_THINKING_MODES = {"auto", "think", "no_think"}
 
 
 class MlxLmGenerator:
@@ -25,12 +26,14 @@ class MlxLmGenerator:
         *,
         max_tokens: int = 512,
         temperature: float = 0.0,
+        thinking_mode: str = "auto",
         loader: LoadFn | None = None,
         generate_fn: GenerateFn | None = None,
     ) -> None:
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.thinking_mode = thinking_mode
         self._loader = loader
         self._generate_fn = generate_fn
         self._model = None
@@ -45,7 +48,7 @@ class MlxLmGenerator:
             answer = generate_fn(
                 model,
                 tokenizer,
-                prompt=prompt,
+                prompt=apply_qwen_thinking_mode(prompt, self.thinking_mode),
                 max_tokens=self.max_tokens,
                 temp=self.temperature,
             )
@@ -105,6 +108,7 @@ class VllmGenerator:
         max_model_len: int | None = None,
         gpu_memory_utilization: float | None = None,
         enforce_eager: bool | None = None,
+        thinking_mode: str = "auto",
         llm_factory: VllmLlmFactory | None = None,
         sampling_params_factory: VllmSamplingParamsFactory | None = None,
     ) -> None:
@@ -116,6 +120,7 @@ class VllmGenerator:
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
         self.enforce_eager = enforce_eager
+        self.thinking_mode = thinking_mode
         self._llm_factory = llm_factory
         self._sampling_params_factory = sampling_params_factory
         self._llm = None
@@ -126,7 +131,10 @@ class VllmGenerator:
         try:
             llm = self._load_llm()
             sampling_params = self._build_sampling_params()
-            outputs = llm.generate([prompt], sampling_params)
+            outputs = llm.generate(
+                [apply_qwen_thinking_mode(prompt, self.thinking_mode)],
+                sampling_params,
+            )
         except Exception:
             logger.exception("vLLM generation failed model=%s", self.model_name)
             raise
@@ -211,3 +219,21 @@ def _safe_vllm_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             "enforce_eager",
         }
     }
+
+
+def apply_qwen_thinking_mode(prompt: str, thinking_mode: str) -> str:
+    """Append a Qwen3 prompt-level thinking switch when requested."""
+
+    if thinking_mode == "auto":
+        return prompt
+    if thinking_mode == "think":
+        suffix = "/think"
+    elif thinking_mode == "no_think":
+        suffix = "/no_think"
+    else:
+        raise ValueError(
+            "thinking_mode must be one of: "
+            + ", ".join(sorted(QWEN_THINKING_MODES))
+        )
+    clean_prompt = prompt.rstrip()
+    return f"{clean_prompt}\n\n{suffix}" if clean_prompt else suffix
