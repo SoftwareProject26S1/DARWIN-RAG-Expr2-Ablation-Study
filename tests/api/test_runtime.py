@@ -26,6 +26,7 @@ def test_runtime_settings_use_env_overrides(tmp_path):
             "DARWIN_EXP2_CHUNKS_PATH": "custom/chunks.parquet",
             "DARWIN_EXP2_SETTINGS": "custom/frozen.yaml",
             "DARWIN_EXP2_QUERY_CLASSIFIER_DIR": "custom/classifier",
+            "DARWIN_EXP2_EMBEDDING_DEVICE": "cuda:1",
             "DARWIN_EXP2_LLM_PLATFORM": "ROCm",
             "DARWIN_EXP2_LLM_MODEL": "local/model",
             "DARWIN_EXP2_LLM_TOKENIZER": "local/tokenizer",
@@ -54,6 +55,8 @@ def test_runtime_settings_use_env_overrides(tmp_path):
     assert settings.llm_max_tokens == 128
     assert settings.llm_temperature == 0.1
     assert settings.embedding_model == "config/embedder"
+    assert settings.embedding_device == "cuda:1"
+    assert settings.classifier_device == "cuda:1"
     assert settings.normalize_embeddings is True
 
 
@@ -185,6 +188,7 @@ def test_runtime_builds_platform_specific_generators(tmp_path, monkeypatch):
             query_classifier_dir=tmp_path / "classifier",
             embedding_backend="hash",
             embedding_model="unused",
+            embedding_device=None,
             normalize_embeddings=True,
             classifier_device="auto",
             llm_platform=platform,
@@ -272,6 +276,7 @@ def test_runtime_warm_starts_vllm_before_retrieval_components(tmp_path, monkeypa
         query_classifier_dir=tmp_path / "classifier",
         embedding_backend="hash",
         embedding_model="unused",
+        embedding_device=None,
         normalize_embeddings=True,
         classifier_device="auto",
         llm_platform="rocm",
@@ -288,6 +293,64 @@ def test_runtime_warm_starts_vllm_before_retrieval_components(tmp_path, monkeypa
     runtime._build_service(settings)
 
     assert events[:3] == ["warm_start", "embedding", "classifier"]
+
+
+def test_runtime_passes_embedding_device_to_sentence_transformer(tmp_path, monkeypatch):
+    from darwin_rag_exp2.api import runtime
+    from darwin_rag_exp2.api.runtime import ApiRuntimeSettings
+
+    events = []
+
+    class FakeGenerator:
+        pass
+
+    class FakeEmbedding:
+        def __init__(self, model_name, *, device):
+            events.append(("embedding", model_name, device))
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            events.append(("classifier", kwargs["device"]))
+
+    monkeypatch.setattr(runtime, "_build_generator", lambda settings: FakeGenerator())
+    monkeypatch.setattr(runtime, "SentenceTransformerEmbeddingModel", FakeEmbedding)
+    monkeypatch.setattr(runtime, "FinalQueryClassifier", FakeClassifier)
+    monkeypatch.setattr(runtime, "FaissSearchBackend", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runtime, "load_primary_run_settings", lambda path: object())
+    monkeypatch.setattr(
+        runtime.ChunkStore,
+        "from_parquet",
+        classmethod(lambda cls, path: object()),
+    )
+
+    settings = ApiRuntimeSettings(
+        config_path=tmp_path / "config.yaml",
+        indexes_dir=tmp_path / "indexes",
+        chunks_path=tmp_path / "chunks.parquet",
+        settings_path=tmp_path / "settings.yaml",
+        query_classifier_dir=tmp_path / "classifier",
+        embedding_backend="sentence-transformers",
+        embedding_model="BAAI/bge-m3",
+        embedding_device="cuda:1",
+        normalize_embeddings=True,
+        classifier_device="cuda:1",
+        llm_platform="rocm",
+        llm_model="local/model",
+        llm_tokenizer=None,
+        llm_hf_config_path=None,
+        llm_max_model_len=None,
+        llm_gpu_memory_utilization=None,
+        llm_enforce_eager=None,
+        llm_max_tokens=33,
+        llm_temperature=0.4,
+    )
+
+    runtime._build_service(settings)
+
+    assert events[:2] == [
+        ("embedding", "BAAI/bge-m3", "cuda:1"),
+        ("classifier", "cuda:1"),
+    ]
 
 
 def test_create_app_with_injected_service_does_not_build_runtime_service(monkeypatch):

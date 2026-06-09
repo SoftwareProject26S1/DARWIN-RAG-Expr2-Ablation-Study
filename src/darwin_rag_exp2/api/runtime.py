@@ -37,6 +37,7 @@ class ApiRuntimeSettings:
     query_classifier_dir: Path
     embedding_backend: str
     embedding_model: str
+    embedding_device: str | None
     normalize_embeddings: bool
     classifier_device: str
     llm_platform: str
@@ -108,8 +109,12 @@ def load_runtime_settings(
             "sentence-transformers",
         ),
         embedding_model=embedding_model,
+        embedding_device=active_env.get("DARWIN_EXP2_EMBEDDING_DEVICE") or None,
         normalize_embeddings=normalize,
-        classifier_device=active_env.get("DARWIN_EXP2_CLASSIFIER_DEVICE", "auto"),
+        classifier_device=active_env.get(
+            "DARWIN_EXP2_CLASSIFIER_DEVICE",
+            active_env.get("DARWIN_EXP2_EMBEDDING_DEVICE", "auto"),
+        ),
         llm_platform=normalize_llm_platform(
             active_env.get("DARWIN_EXP2_LLM_PLATFORM"),
         ),
@@ -144,13 +149,15 @@ def build_default_message_service() -> MessageService:
         raise
     logger.info(
         "API runtime settings loaded config=%s indexes=%s chunks=%s settings=%s "
-        "classifier=%s embedding_backend=%s classifier_device=%s llm_platform=%s",
+        "classifier=%s embedding_backend=%s embedding_device=%s "
+        "classifier_device=%s llm_platform=%s",
         settings.config_path,
         settings.indexes_dir,
         settings.chunks_path,
         settings.settings_path,
         settings.query_classifier_dir,
         settings.embedding_backend,
+        settings.embedding_device,
         settings.classifier_device,
         settings.llm_platform,
     )
@@ -171,13 +178,17 @@ def _build_service(settings: ApiRuntimeSettings) -> MessageService:
 
         stage = "embedding_model"
         logger.info(
-            "message service stage=%s started backend=%s model=%s",
+            "message service stage=%s started backend=%s model=%s device=%s",
             stage,
             settings.embedding_backend,
             settings.embedding_model,
+            settings.embedding_device,
         )
         if settings.embedding_backend == "sentence-transformers":
-            embedding_model = SentenceTransformerEmbeddingModel(settings.embedding_model)
+            embedding_model = SentenceTransformerEmbeddingModel(
+                settings.embedding_model,
+                device=settings.embedding_device,
+            )
         elif settings.embedding_backend == "hash":
             embedding_model = HashEmbeddingModel()
         else:
