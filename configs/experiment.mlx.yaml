@@ -1,0 +1,53 @@
+experiment:
+  name: darwin-rag-exp2-mlx-local
+  seed: 42
+  primary_categories:
+    - "채용"
+    - "장학"
+    - "비교과·행사"
+    - "학사"
+    - "봉사"
+    - "국제교류"
+    - "외국인유학생"
+    - "교원채용"
+  excluded_primary_categories:
+    - "기타"
+    - "미분류"
+    - "교직"
+
+data:
+  source_export: data/raw/scatch_notices.jsonl
+  min_primary_source_documents: 100
+  query_type_non_single_fraction: 0.30
+
+chunking:
+  counting_tokenizer: klue/bert-base
+  embedder: BAAI/bge-m3
+  target_body_tokens: 384
+  overlap_body_tokens: 64
+  minimum_information_tokens: 30
+  title_prefix_max_tokens: 64
+  classifier_max_tokens: 512
+
+retrieval:
+  normalize_embeddings: true
+  similarity_metric: cosine_via_inner_product
+  similarity_score_mapping: cosine_to_unit_interval
+  candidate_k_per_partition: 50
+  report_top_k: 10
+  generation_context_top_n: 5
+  fixed_lambda_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+models:
+  classifier: klue/bert-base
+  embedder: BAAI/bge-m3
+  generator: Qwen/Qwen3-4B-MLX-4bit
+  generator_mlx: Qwen/Qwen3-4B-MLX-4bit
+  generator_vllm: Qwen/Qwen2.5-7B-Instruct
+  generator_fallback: mlx-community/Qwen2.5-7B-Instruct-4bit
+
+evaluation:
+  crossfit_folds: 5
+  dev_queries: 80
+  test_queries: 240
+  generation_temperature: 0.0
