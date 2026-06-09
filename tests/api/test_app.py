@@ -78,3 +78,25 @@ def test_api_messages_allows_vite_localhost_cors_preflight():
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_api_messages_reads_allowed_cors_origins_from_env(monkeypatch):
+    from darwin_rag_exp2.api.app import create_app
+
+    monkeypatch.setenv(
+        "DARWIN_EXP2_API_CORS_ALLOWED_ORIGINS",
+        "http://localhost:5173, http://127.0.0.1:5173",
+    )
+    client = _client(create_app(service=FakeMessageService()))
+
+    response = client.options(
+        "/api/messages",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"

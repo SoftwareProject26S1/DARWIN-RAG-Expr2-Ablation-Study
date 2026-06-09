@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from time import perf_counter
 
 from pydantic import BaseModel
@@ -13,7 +14,8 @@ from .service import MessageService, MessageValidationError
 
 logger = logging.getLogger(__name__)
 
-LOCAL_FRONTEND_ORIGIN = "http://localhost:5173"
+CORS_ALLOWED_ORIGINS_ENV = "DARWIN_EXP2_API_CORS_ALLOWED_ORIGINS"
+DEFAULT_CORS_ALLOWED_ORIGINS = ("http://localhost:5173",)
 
 
 class MessageRequest(BaseModel):
@@ -31,7 +33,7 @@ def create_app(*, service: MessageService | None = None):
     app = FastAPI(title="DARWIN-RAG Exp2 API")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[LOCAL_FRONTEND_ORIGIN],
+        allow_origins=_load_cors_allowed_origins(),
         allow_methods=["POST"],
         allow_headers=["*"],
     )
@@ -67,6 +69,14 @@ def create_app(*, service: MessageService | None = None):
         handle_message
     )
     return app
+
+
+def _load_cors_allowed_origins() -> list[str]:
+    value = os.environ.get(CORS_ALLOWED_ORIGINS_ENV)
+    if value is None:
+        return list(DEFAULT_CORS_ALLOWED_ORIGINS)
+    origins = [origin.strip() for origin in value.split(",") if origin.strip()]
+    return origins or list(DEFAULT_CORS_ALLOWED_ORIGINS)
 
 
 def _get_message_service(app) -> MessageService:
