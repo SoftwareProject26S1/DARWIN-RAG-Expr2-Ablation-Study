@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
 import logging
+import re
 from typing import Any
 
 
@@ -12,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 LoadFn = Callable[[str], tuple[Any, Any]]
 GenerateFn = Callable[..., str]
+MlxSamplerFactory = Callable[..., Any]
+MlxLogitsProcessorsFactory = Callable[..., list[Any]]
 VllmLlmFactory = Callable[..., Any]
 VllmSamplingParamsFactory = Callable[..., Any]
 QWEN_THINKING_MODES = {"auto", "think", "no_think"}
@@ -27,15 +31,29 @@ class MlxLmGenerator:
         max_tokens: int = 512,
         temperature: float = 0.0,
         thinking_mode: str = "auto",
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+        presence_penalty: float | None = None,
         loader: LoadFn | None = None,
         generate_fn: GenerateFn | None = None,
+        sampler_factory: MlxSamplerFactory | None = None,
+        logits_processors_factory: MlxLogitsProcessorsFactory | None = None,
     ) -> None:
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.thinking_mode = thinking_mode
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.repetition_penalty = repetition_penalty
+        self.presence_penalty = presence_penalty
         self._loader = loader
         self._generate_fn = generate_fn
+        self._sampler_factory = sampler_factory
+        self._logits_processors_factory = logits_processors_factory
         self._model = None
         self._tokenizer = None
 
@@ -45,17 +63,21 @@ class MlxLmGenerator:
         try:
             model, tokenizer = self._load_model()
             generate_fn = self._resolve_generate_fn()
-            answer = generate_fn(
-                model,
-                tokenizer,
-                prompt=apply_qwen_thinking_mode(prompt, self.thinking_mode),
-                max_tokens=self.max_tokens,
-                temp=self.temperature,
-            )
+            generation_kwargs: dict[str, Any] = {
+                "prompt": apply_qwen_thinking_mode(prompt, self.thinking_mode),
+                "max_tokens": self.max_tokens,
+            }
+            sampler = self._build_sampler()
+            if sampler is not None:
+                generation_kwargs["sampler"] = sampler
+            logits_processors = self._build_logits_processors()
+            if logits_processors:
+                generation_kwargs["logits_processors"] = logits_processors
+            answer = generate_fn(model, tokenizer, **generation_kwargs)
         except Exception:
             logger.exception("MLX generation failed model=%s", self.model_name)
             raise
-        return str(answer).strip()
+        return clean_generated_answer(answer)
 
     def _load_model(self) -> tuple[Any, Any]:
         if self._model is None or self._tokenizer is None:
@@ -93,6 +115,59 @@ class MlxLmGenerator:
             ) from error
         return generate
 
+    def _build_sampler(self) -> Any | None:
+        if (
+            self.temperature == 0.0
+            and self.top_p is None
+            and self.top_k is None
+            and self.min_p is None
+        ):
+            return None
+        sampler_factory = self._resolve_sampler_factory()
+        kwargs: dict[str, Any] = {"temp": self.temperature}
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            kwargs["top_k"] = self.top_k
+        if self.min_p is not None:
+            kwargs["min_p"] = self.min_p
+        return sampler_factory(**kwargs)
+
+    def _build_logits_processors(self) -> list[Any] | None:
+        if self.repetition_penalty is None and self.presence_penalty is None:
+            return None
+        logits_processors_factory = self._resolve_logits_processors_factory()
+        kwargs: dict[str, Any] = {}
+        if self.repetition_penalty is not None:
+            kwargs["repetition_penalty"] = self.repetition_penalty
+        if self.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.presence_penalty
+        return logits_processors_factory(**kwargs)
+
+    def _resolve_sampler_factory(self) -> MlxSamplerFactory:
+        if self._sampler_factory is not None:
+            return self._sampler_factory
+        try:
+            from mlx_lm.sample_utils import make_sampler
+        except ImportError as error:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "mlx-lm is required for local LLM generation; "
+                "run with the api dependency group"
+            ) from error
+        return make_sampler
+
+    def _resolve_logits_processors_factory(self) -> MlxLogitsProcessorsFactory:
+        if self._logits_processors_factory is not None:
+            return self._logits_processors_factory
+        try:
+            from mlx_lm.sample_utils import make_logits_processors
+        except ImportError as error:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "mlx-lm is required for local LLM generation; "
+                "run with the api dependency group"
+            ) from error
+        return make_logits_processors
+
 
 class VllmGenerator:
     """Lazy vLLM wrapper with a small generate(prompt) surface."""
@@ -109,6 +184,11 @@ class VllmGenerator:
         gpu_memory_utilization: float | None = None,
         enforce_eager: bool | None = None,
         thinking_mode: str = "auto",
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+        presence_penalty: float | None = None,
         llm_factory: VllmLlmFactory | None = None,
         sampling_params_factory: VllmSamplingParamsFactory | None = None,
     ) -> None:
@@ -121,6 +201,11 @@ class VllmGenerator:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.enforce_eager = enforce_eager
         self.thinking_mode = thinking_mode
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.repetition_penalty = repetition_penalty
+        self.presence_penalty = presence_penalty
         self._llm_factory = llm_factory
         self._sampling_params_factory = sampling_params_factory
         self._llm = None
@@ -138,7 +223,7 @@ class VllmGenerator:
         except Exception:
             logger.exception("vLLM generation failed model=%s", self.model_name)
             raise
-        return str(outputs[0].outputs[0].text).strip()
+        return clean_generated_answer(outputs[0].outputs[0].text)
 
     def warm_start(self) -> None:
         """Load the vLLM engine before request-time retrieval touches Torch/CUDA."""
@@ -175,10 +260,22 @@ class VllmGenerator:
 
     def _build_sampling_params(self) -> Any:
         sampling_params_factory = self._resolve_sampling_params_factory()
-        return sampling_params_factory(
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        kwargs: dict[str, Any] = {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            kwargs["top_k"] = self.top_k
+        if self.min_p is not None:
+            kwargs["min_p"] = self.min_p
+        if self.repetition_penalty is not None:
+            kwargs["repetition_penalty"] = self.repetition_penalty
+        if self.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.presence_penalty
+        kwargs = _filter_supported_kwargs(sampling_params_factory, kwargs)
+        return sampling_params_factory(**kwargs)
 
     def _resolve_llm_factory(self) -> VllmLlmFactory:
         if self._llm_factory is not None:
@@ -237,3 +334,53 @@ def apply_qwen_thinking_mode(prompt: str, thinking_mode: str) -> str:
         )
     clean_prompt = prompt.rstrip()
     return f"{clean_prompt}\n\n{suffix}" if clean_prompt else suffix
+
+
+def clean_generated_answer(answer: object) -> str:
+    """Normalize model output to the final answer surface returned by the API."""
+
+    text = str(answer).strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = text.strip()
+    marker = "최종 답변:"
+    if marker in text:
+        text = text.split(marker, 1)[1].strip()
+    return _remove_repeated_separator_sections(text)
+
+
+def _remove_repeated_separator_sections(text: str) -> str:
+    sections = [section.strip() for section in re.split(r"\s*---\s*", text)]
+    kept: list[str] = []
+    seen: set[str] = set()
+    for section in sections:
+        normalized = re.sub(r"\s+", " ", section).strip()
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        if normalized.startswith("(최종 답변은") and "추측" in normalized:
+            continue
+        seen.add(normalized)
+        kept.append(section)
+    return " --- ".join(kept).strip()
+
+
+def _filter_supported_kwargs(
+    callable_obj: Callable[..., Any],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return kwargs
+    parameters = signature.parameters.values()
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return kwargs
+    supported = set(signature.parameters)
+    dropped = sorted(key for key in kwargs if key not in supported)
+    if dropped:
+        logger.warning(
+            "dropping unsupported vLLM SamplingParams options keys=%s",
+            dropped,
+        )
+    return {key: value for key, value in kwargs.items() if key in supported}

@@ -50,6 +50,11 @@ class ApiRuntimeSettings:
     llm_max_tokens: int
     llm_temperature: float
     llm_thinking_mode: str
+    llm_top_p: float | None = None
+    llm_top_k: int | None = None
+    llm_min_p: float | None = None
+    llm_repetition_penalty: float | None = None
+    llm_presence_penalty: float | None = None
 
     def build_service(self) -> MessageService:
         """Build the default service using this runtime configuration."""
@@ -89,6 +94,9 @@ def load_runtime_settings(
     normalize = True
     if isinstance(retrieval, dict) and "normalize_embeddings" in retrieval:
         normalize = bool(retrieval["normalize_embeddings"])
+    thinking_mode = normalize_llm_thinking_mode(
+        active_env.get("DARWIN_EXP2_LLM_THINKING_MODE"),
+    )
 
     return ApiRuntimeSettings(
         config_path=config_path,
@@ -135,9 +143,36 @@ def load_runtime_settings(
             "DARWIN_EXP2_LLM_ENFORCE_EAGER",
         ),
         llm_max_tokens=int(active_env.get("DARWIN_EXP2_LLM_MAX_TOKENS", "512")),
-        llm_temperature=float(active_env.get("DARWIN_EXP2_LLM_TEMPERATURE", "0.0")),
-        llm_thinking_mode=normalize_llm_thinking_mode(
-            active_env.get("DARWIN_EXP2_LLM_THINKING_MODE"),
+        llm_temperature=_parse_generation_float(
+            active_env.get("DARWIN_EXP2_LLM_TEMPERATURE"),
+            "DARWIN_EXP2_LLM_TEMPERATURE",
+            0.6 if thinking_mode == "think" else 0.0,
+        ),
+        llm_thinking_mode=thinking_mode,
+        llm_top_p=_parse_generation_float(
+            active_env.get("DARWIN_EXP2_LLM_TOP_P"),
+            "DARWIN_EXP2_LLM_TOP_P",
+            0.95 if thinking_mode == "think" else None,
+        ),
+        llm_top_k=_parse_generation_int(
+            active_env.get("DARWIN_EXP2_LLM_TOP_K"),
+            "DARWIN_EXP2_LLM_TOP_K",
+            20 if thinking_mode == "think" else None,
+        ),
+        llm_min_p=_parse_generation_float(
+            active_env.get("DARWIN_EXP2_LLM_MIN_P"),
+            "DARWIN_EXP2_LLM_MIN_P",
+            0.0 if thinking_mode == "think" else None,
+        ),
+        llm_repetition_penalty=_parse_generation_float(
+            active_env.get("DARWIN_EXP2_LLM_REPETITION_PENALTY"),
+            "DARWIN_EXP2_LLM_REPETITION_PENALTY",
+            None,
+        ),
+        llm_presence_penalty=_parse_generation_float(
+            active_env.get("DARWIN_EXP2_LLM_PRESENCE_PENALTY"),
+            "DARWIN_EXP2_LLM_PRESENCE_PENALTY",
+            None,
         ),
     )
 
@@ -247,12 +282,18 @@ def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
     model_name = settings.resolve_llm_model()
     logger.info(
         "building answer generator platform=%s model=%s max_tokens=%s "
-        "temperature=%s thinking_mode=%s",
+        "temperature=%s thinking_mode=%s top_p=%s top_k=%s min_p=%s "
+        "repetition_penalty=%s presence_penalty=%s",
         settings.llm_platform,
         model_name,
         settings.llm_max_tokens,
         settings.llm_temperature,
         settings.llm_thinking_mode,
+        settings.llm_top_p,
+        settings.llm_top_k,
+        settings.llm_min_p,
+        settings.llm_repetition_penalty,
+        settings.llm_presence_penalty,
     )
     if settings.llm_platform == "mlx":
         return MlxLmGenerator(
@@ -260,6 +301,11 @@ def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
             max_tokens=settings.llm_max_tokens,
             temperature=settings.llm_temperature,
             thinking_mode=settings.llm_thinking_mode,
+            top_p=settings.llm_top_p,
+            top_k=settings.llm_top_k,
+            min_p=settings.llm_min_p,
+            repetition_penalty=settings.llm_repetition_penalty,
+            presence_penalty=settings.llm_presence_penalty,
         )
     if settings.llm_platform in {"rocm", "cuda"}:
         return VllmGenerator(
@@ -272,6 +318,11 @@ def _build_generator(settings: ApiRuntimeSettings) -> AnswerGenerator:
             gpu_memory_utilization=settings.llm_gpu_memory_utilization,
             enforce_eager=settings.llm_enforce_eager,
             thinking_mode=settings.llm_thinking_mode,
+            top_p=settings.llm_top_p,
+            top_k=settings.llm_top_k,
+            min_p=settings.llm_min_p,
+            repetition_penalty=settings.llm_repetition_penalty,
+            presence_penalty=settings.llm_presence_penalty,
         )
     raise ValueError("DARWIN_EXP2_LLM_PLATFORM must be one of: MLX, ROCm, CUDA")
 
@@ -431,6 +482,24 @@ def _parse_optional_bool(value: str | None, name: str) -> bool | None:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be one of: true, false, 1, 0, yes, no, on, off")
+
+
+def _parse_generation_float(
+    value: str | None,
+    name: str,
+    default: float | None,
+) -> float | None:
+    parsed = _parse_optional_float(value, name)
+    return default if parsed is None else parsed
+
+
+def _parse_generation_int(
+    value: str | None,
+    name: str,
+    default: int | None,
+) -> int | None:
+    parsed = _parse_optional_int(value, name)
+    return default if parsed is None else parsed
 
 
 def _load_yaml(path: Path) -> dict[str, object]:

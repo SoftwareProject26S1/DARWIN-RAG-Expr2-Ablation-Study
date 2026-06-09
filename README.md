@@ -49,9 +49,26 @@ Supported values:
 For Qwen3 thinking mode, consider overriding decoding as well, for example:
 
 ```bash
-DARWIN_EXP2_LLM_MODEL=Qwen/Qwen3-4B-MLX-4bit \
+DARWIN_EXP2_LLM_MODEL=Qwen/Qwen3-4B \
 DARWIN_EXP2_LLM_THINKING_MODE=think \
-DARWIN_EXP2_LLM_TEMPERATURE=0.6 \
 DARWIN_EXP2_LLM_MAX_TOKENS=2048 \
-uv run darwin-exp2 serve-api --platform MLX
+DARWIN_EXP2_LLM_REPETITION_PENALTY=1.05 \
+DARWIN_EXP2_LLM_PRESENCE_PENALTY=0.2 \
+uv run darwin-exp2 serve-api --platform ROCm
 ```
+
+The same environment variables are used on `--platform MLX`; the runtime maps
+them to MLX-LM `make_sampler()` and `make_logits_processors()` instead of
+vLLM `SamplingParams`.
+
+When `DARWIN_EXP2_LLM_THINKING_MODE=think` is set, the runtime defaults to the
+Qwen3 thinking sampling profile unless explicitly overridden:
+
+- `DARWIN_EXP2_LLM_TEMPERATURE=0.6`
+- `DARWIN_EXP2_LLM_TOP_P=0.95`
+- `DARWIN_EXP2_LLM_TOP_K=20`
+- `DARWIN_EXP2_LLM_MIN_P=0.0`
+
+The repetition and presence penalties are optional generation overrides for
+long repeated tails. Unsupported vLLM `SamplingParams` options are skipped for
+older vLLM versions and logged as warnings.
