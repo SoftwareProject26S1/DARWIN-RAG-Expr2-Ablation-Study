@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import orjson
 
-from darwin_rag_exp2.evaluation.retrieval_metrics import retrieval_metrics_at_k
+from darwin_rag_exp2.evaluation.retrieval_metrics import (
+    graded_retrieval_metrics_at_k,
+    retrieval_metrics_at_k,
+)
 
 from .routing import soft_route_categories, top1_category
 from .types import (
@@ -23,7 +28,10 @@ from .variants import (
     SEARCH_MODE_CATEGORY_SCORE_MERGE,
     SEARCH_MODE_UNIFIED_PRIOR_RERANK,
     SEARCH_MODES,
-    run_primary_variants,
+    run_b0,
+    run_b1,
+    run_b2_score,
+    run_p_score,
 )
 
 
@@ -40,19 +48,30 @@ def run_primary_queries(
     _validate_search_options(search_mode, unified_candidate_k)
     rows: list[dict[str, object]] = []
     for query in queries:
-        variant_results = run_primary_variants(
-            query,
-            search_backend=search_backend,
-            settings=settings,
-            search_mode=search_mode,
-            unified_candidate_k=unified_candidate_k,
+        variant_runs = (
+            partial(run_b0, query, search_backend=search_backend, settings=settings),
+            partial(run_b1, query, search_backend=search_backend, settings=settings),
+            partial(
+                run_b2_score, query, search_backend=search_backend,
+                settings=settings, search_mode=search_mode,
+                unified_candidate_k=unified_candidate_k,
+            ),
+            partial(
+                run_p_score, query, search_backend=search_backend,
+                settings=settings, search_mode=search_mode,
+                unified_candidate_k=unified_candidate_k,
+            ),
         )
-        for variant_result in variant_results.values():
+        for run_variant in variant_runs:
+            started_at = perf_counter()
+            variant_result = run_variant()
+            retrieval_time_ms = (perf_counter() - started_at) * 1000.0
             rows.append(
                 _result_row(
                     query,
                     variant_result,
                     settings,
+                    retrieval_time_ms=retrieval_time_ms,
                     search_mode=search_mode,
                     unified_candidate_k=unified_candidate_k,
                 )
@@ -69,6 +88,7 @@ def write_primary_run(
 ) -> None:
     """Write Phase 9 result rows and a small manifest."""
 
+    validate_primary_result_rows(result_rows)
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_jsonl(output_dir / "results.jsonl", result_rows)
     query_ids = {str(row["query_id"]) for row in result_rows}
@@ -88,11 +108,26 @@ def write_primary_run(
     _write_json(output_dir / "manifest.json", manifest)
 
 
+def validate_primary_result_rows(result_rows: Sequence[Mapping[str, object]]) -> None:
+    for index, row in enumerate(result_rows, start=1):
+        value = row.get("retrieval_time_ms")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or value < 0
+        ):
+            raise ValueError(
+                "primary result row "
+                f"{index} has invalid retrieval_time_ms: {value!r}"
+            )
+
+
 def _result_row(
     query: QueryFeatures,
     variant_result: VariantResult,
     settings: PrimaryRunSettings,
     *,
+    retrieval_time_ms: float,
     search_mode: str,
     unified_candidate_k: int,
 ) -> dict[str, object]:
@@ -101,7 +136,15 @@ def _result_row(
         gold_chunk_ids=query.gold_chunks,
         k=settings.report_top_k,
     )
-    return {
+    if query.graded_relevance:
+        metric_values.update(
+            graded_retrieval_metrics_at_k(
+                ranked_chunk_ids=[row.chunk_id for row in variant_result.top10],
+                relevance_by_chunk_id=query.graded_relevance,
+                k=settings.report_top_k,
+            )
+        )
+    row = {
         "query_id": query.query_id,
         "query": query.query,
         "variant": variant_result.variant,
@@ -109,6 +152,7 @@ def _result_row(
         "gold_chunks": list(query.gold_chunks),
         "gold_categories": list(query.gold_categories),
         "query_probabilities": dict(query.probabilities),
+        "retrieval_time_ms": retrieval_time_ms,
         "routing": _routing_payload(
             query,
             variant_result.variant,
@@ -118,11 +162,19 @@ def _result_row(
         ),
         "metrics": metric_values,
         "top10": [_ranked_payload(row) for row in variant_result.top10],
-        "top5_contexts": [
-            _ranked_payload(row)
-            for row in variant_result.top5_contexts
-        ],
+        "top5_contexts": list(map(_ranked_payload, variant_result.top5_contexts)),
     }
+    if query.graded_relevance:
+        row["graded_relevance"] = dict(query.graded_relevance)
+    if query.neighbor_chunk_ids:
+        row["neighbor_chunk_ids"] = list(query.neighbor_chunk_ids)
+    if query.source_id:
+        row["source_id"] = query.source_id
+    if query.evidence_unit:
+        row["evidence_unit"] = query.evidence_unit
+    if query.schema_version:
+        row["schema_version"] = query.schema_version
+    return row
 
 
 def _routing_payload(

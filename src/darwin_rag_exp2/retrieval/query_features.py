@@ -7,6 +7,7 @@ from pathlib import Path
 
 import orjson
 
+from darwin_rag_exp2.evaluation import queries as query_validation
 from darwin_rag_exp2.indexing.embeddings import EmbeddingModel, l2_normalize
 
 from .types import QueryFeatures
@@ -24,8 +25,7 @@ def load_query_rows(path: Path) -> list[dict[str, object]]:
             row = orjson.loads(stripped)
             if not isinstance(row, dict):
                 raise ValueError(f"query row {line_number} must be an object")
-            _validate_query_row(row, line_number=line_number)
-            rows.append(dict(row))
+            rows.append(_normalize_query_row(row, line_number=line_number))
     if not rows:
         raise ValueError(f"no query rows found in {path}")
     return rows
@@ -130,12 +130,31 @@ def build_query_features(
                 gold_chunks=tuple(str(value) for value in row["gold_chunks"]),
                 gold_categories=tuple(str(value) for value in row["gold_categories"]),
                 query_type=str(row["query_type"]),
+                graded_relevance=_graded_relevance(row),
+                neighbor_chunk_ids=_string_tuple(row.get("neighbor_chunk_ids", ())),
+                source_id=str(row.get("source_id") or ""),
+                evidence_unit=str(row.get("evidence_unit") or ""),
+                schema_version=str(row.get("schema_version") or ""),
+                requires_multi_category=_optional_bool(row, "requires_multi_category"),
+                gold_category_pure=_optional_bool(row, "gold_category_pure"),
             )
         )
     return features
 
 
-def _validate_query_row(row: Mapping[str, object], *, line_number: int) -> None:
+def _normalize_query_row(
+    row: Mapping[str, object],
+    *,
+    line_number: int,
+) -> dict[str, object]:
+    if row.get("schema_version") == query_validation.V2_SCHEMA_VERSION:
+        return _normalize_v2_query_row(row, line_number=line_number)
+
+    _validate_legacy_query_row(row, line_number=line_number)
+    return dict(row)
+
+
+def _validate_legacy_query_row(row: Mapping[str, object], *, line_number: int) -> None:
     required = {
         "query_id",
         "query",
@@ -155,6 +174,101 @@ def _validate_query_row(row: Mapping[str, object], *, line_number: int) -> None:
         raise ValueError(f"query row {line_number} must contain gold_chunks")
     if not isinstance(row["gold_categories"], list) or not row["gold_categories"]:
         raise ValueError(f"query row {line_number} must contain gold_categories")
+
+
+def _normalize_v2_query_row(
+    row: Mapping[str, object],
+    *,
+    line_number: int,
+) -> dict[str, object]:
+    helper_row = dict(row)
+    graded_relevance = row.get("graded_relevance")
+    gold_chunks = _gold_chunk_ids(row)
+    if isinstance(graded_relevance, Mapping) and gold_chunks:
+        helper_row["graded_relevance"] = {
+            chunk_id: graded_relevance[chunk_id]
+            for chunk_id in gold_chunks
+            if chunk_id in graded_relevance
+        }
+    normalized = query_validation._normalize_v2_row(
+        _split_from_query_id(row),
+        line_number,
+        helper_row,
+        chunk_ids=_known_chunk_ids(row),
+        config=query_validation.QueryValidationConfig(
+            primary_categories=_known_categories(row),
+            expected_dev_count=0,
+            expected_test_count=0,
+            non_single_fraction=0.0,
+        ),
+    )
+    normalized["graded_relevance"] = _graded_relevance(row)
+    return normalized
+
+
+def _split_from_query_id(row: Mapping[str, object]) -> str:
+    query_id = str(row.get("query_id", ""))
+    if query_id.startswith("test_q"):
+        return "test"
+    return "dev"
+
+
+def _known_chunk_ids(row: Mapping[str, object]) -> set[str]:
+    chunk_ids = set(_string_tuple(row.get("neighbor_chunk_ids", ())))
+    chunk_ids.update(_gold_chunk_ids(row))
+    return chunk_ids
+
+
+def _gold_chunk_ids(row: Mapping[str, object]) -> tuple[str, ...]:
+    gold_chunk_ids = row.get("gold_chunk_ids")
+    if not isinstance(gold_chunk_ids, list):
+        return ()
+    chunks: list[str] = []
+    for item in gold_chunk_ids:
+        if isinstance(item, Mapping):
+            chunk_id = item.get("chunk_id")
+            if isinstance(chunk_id, str):
+                chunks.append(chunk_id)
+    return tuple(chunks)
+
+
+def _known_categories(row: Mapping[str, object]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            [
+                *_string_tuple(row.get("expected_categories", ())),
+                *_string_tuple(row.get("gold_category_set", ())),
+            ]
+        )
+    )
+
+
+def _graded_relevance(row: Mapping[str, object]) -> dict[str, float]:
+    graded_relevance = row.get("graded_relevance", {})
+    if not isinstance(graded_relevance, Mapping):
+        return {}
+    normalized: dict[str, float] = {}
+    for chunk_id, score in graded_relevance.items():
+        if isinstance(score, bool) or not isinstance(score, int | float):
+            raise ValueError("graded_relevance values must be numeric")
+        relevance = float(score)
+        if relevance < 0.0 or relevance > 1.0:
+            raise ValueError("graded_relevance values must be in [0, 1]")
+        normalized[str(chunk_id)] = relevance
+    return normalized
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _optional_bool(row: Mapping[str, object], key: str) -> bool | None:
+    value = row.get(key)
+    if isinstance(value, bool):
+        return value
+    return None
 
 
 def _extract_probabilities(row: Mapping[str, object]) -> dict[str, float]:

@@ -27,6 +27,9 @@ journal-resources/
 
 # Skills
 docs/superpowers/
+.omo/
+.codegraph/
+.codegraph
 
 # Environments
 .env*

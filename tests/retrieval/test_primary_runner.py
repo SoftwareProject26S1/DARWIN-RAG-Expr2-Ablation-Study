@@ -71,7 +71,13 @@ def test_primary_runner_writes_variant_rows_metrics_and_manifest(tmp_path) -> No
         "B2-score",
         "P-score",
     }
+    assert all(
+        isinstance(row["retrieval_time_ms"], int | float)
+        and row["retrieval_time_ms"] >= 0
+        for row in result_lines
+    )
     assert result_lines[0]["metrics"]["hit@2"] == 1.0
+    assert "schema_version" not in result_lines[0]
     assert result_lines[0]["top10"][0]["chunk_id"] == "c1"
     assert result_lines[0]["top5_contexts"][0]["chunk_id"] == "c1"
     assert result_lines[2]["routing"]["search_mode"] == "category-score-merge"
@@ -79,3 +85,71 @@ def test_primary_runner_writes_variant_rows_metrics_and_manifest(tmp_path) -> No
     assert manifest["query_count"] == 1
     assert manifest["variant_count"] == 4
     assert manifest["settings"]["theta_route"] == 0.6
+
+
+def test_primary_runner_includes_v2_metadata_and_graded_metrics_when_present() -> None:
+    settings = PrimaryRunSettings(
+        candidate_k_per_partition=2,
+        report_top_k=2,
+        generation_context_top_n=1,
+        theta_route=0.6,
+        lambda_fixed=0.5,
+        lambda_by_category={"학사": 0.8, "장학": 0.7},
+    )
+    query = QueryFeatures(
+        query_id="test_q0001",
+        query="수강신청 변경 기간은 언제야?",
+        embedding=[1.0, 0.0],
+        probabilities={"학사": 0.9, "장학": 0.7},
+        gold_chunks=("c1",),
+        gold_categories=("학사",),
+        query_type="single_category",
+        graded_relevance={"c1": 1.0},
+        neighbor_chunk_ids=("c0", "c2"),
+        source_id="notice-1",
+        evidence_unit="paragraph",
+        schema_version="eval_v3_overlap_aware_rechunked",
+    )
+
+    rows = run_primary_queries(
+        [query],
+        search_backend=OneQuerySearchBackend(),
+        settings=settings,
+    )
+
+    first_row = rows[0]
+    assert first_row["graded_relevance"] == {"c1": 1.0}
+    assert first_row["neighbor_chunk_ids"] == ["c0", "c2"]
+    assert first_row["source_id"] == "notice-1"
+    assert first_row["evidence_unit"] == "paragraph"
+    assert first_row["schema_version"] == "eval_v3_overlap_aware_rechunked"
+    assert first_row["metrics"]["graded_ndcg@2"] == 1.0
+    assert isinstance(first_row["retrieval_time_ms"], int | float)
+    assert first_row["retrieval_time_ms"] >= 0
+
+
+def test_primary_runner_rejects_result_rows_missing_retrieval_time_ms(tmp_path) -> None:
+    settings = PrimaryRunSettings(
+        candidate_k_per_partition=2,
+        report_top_k=2,
+        generation_context_top_n=1,
+        theta_route=0.6,
+        lambda_fixed=0.5,
+        lambda_by_category={"학사": 0.8, "장학": 0.7},
+    )
+
+    try:
+        write_primary_run(
+            output_dir=tmp_path,
+            result_rows=[
+                {
+                    "query_id": "test_q0001",
+                    "variant": "B0",
+                }
+            ],
+            settings=settings,
+        )
+    except ValueError as exc:
+        assert "retrieval_time_ms" in str(exc)
+    else:
+        raise AssertionError("missing retrieval_time_ms was accepted")

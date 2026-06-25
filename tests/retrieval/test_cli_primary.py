@@ -2,6 +2,7 @@ import json
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from darwin_rag_exp2 import cli
 from darwin_rag_exp2.retrieval.types import SearchHit
@@ -126,6 +127,113 @@ def test_run_primary_cli_writes_four_variant_rows_with_precomputed_probabilities
     assert manifest["query_count"] == 1
     assert manifest["run_metadata"]["router"] == "precomputed"
     assert manifest["run_metadata"]["search_mode"] == "category-score-merge"
+
+
+def test_run_primary_cli_records_v2_four_variant_manifest_lineage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    queries_path = tmp_path / "queries_test_v2.jsonl"
+    settings_path = tmp_path / "frozen.yaml"
+    indexes_path = tmp_path / "indexes"
+    classifier_path = tmp_path / "classifier"
+    output_path = tmp_path / "run"
+    indexes_path.mkdir()
+    classifier_path.mkdir()
+    queries_path.write_text(
+        json.dumps(
+            {
+                "query_id": "test_q0001",
+                "query": "수강신청 변경 기간은?",
+                "gold_chunk_ids": [
+                    {
+                        "chunk_id": "c1",
+                        "source_id": "notice-1",
+                        "chunk_index": 0,
+                        "relevance": 2,
+                        "role": "direct",
+                    }
+                ],
+                "neighbor_chunk_ids": ["c0", "c2"],
+                "graded_relevance": {"c1": 1.0},
+                "expected_categories": ["학사"],
+                "gold_category_set": ["학사"],
+                "gold_category_pure": True,
+                "requires_multi_category": False,
+                "evidence_unit": "paragraph",
+                "schema_version": "eval_v3_overlap_aware_rechunked",
+                "source_id": "notice-1",
+                "reference_answer": "3월입니다.",
+                "query_type": "single_category",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings_path.write_text(
+        "\n".join(
+            [
+                "candidate_k_per_partition: 2",
+                "report_top_k: 1",
+                "generation_context_top_n: 1",
+                "theta_route: 0.6",
+                "lambda_fixed: 0.5",
+                "lambda_by_category:",
+                "  학사: 0.8",
+                "  장학: 0.7",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "FaissSearchBackend", CliSearchBackend)
+    monkeypatch.setattr(cli, "FinalQueryClassifier", FakeFinalQueryClassifier)
+
+    result = cli.main(
+        [
+            "run-primary",
+            "--queries",
+            str(queries_path),
+            "--settings",
+            str(settings_path),
+            "--indexes",
+            str(indexes_path),
+            "--output",
+            str(output_path),
+            "--embedding-backend",
+            "hash",
+            "--query-classifier",
+            str(classifier_path),
+        ]
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (output_path / "results.jsonl").read_text().splitlines()
+    ]
+    manifest = json.loads((output_path / "manifest.json").read_text())
+
+    assert result == 0
+    assert len(rows) == 4
+    assert {row["variant"] for row in rows} == {
+        "B0",
+        "B1",
+        "B2-score",
+        "P-score",
+    }
+    assert all(row["schema_version"] == "eval_v3_overlap_aware_rechunked" for row in rows)
+    assert all(row["metrics"]["hit@1"] == 1.0 for row in rows)
+    assert all(row["metrics"]["graded_ndcg@1"] == 1.0 for row in rows)
+    assert manifest["query_count"] == 1
+    assert manifest["row_count"] == 4
+    assert manifest["variant_count"] == 4
+    assert manifest["variants"] == ["B0", "B1", "B2-score", "P-score"]
+    assert manifest["run_metadata"]["queries_path"] == str(queries_path)
+    assert manifest["run_metadata"]["schema_versions"] == [
+        "eval_v3_overlap_aware_rechunked"
+    ]
+    assert manifest["run_metadata"]["settings_path"] == str(settings_path)
+    assert manifest["run_metadata"]["indexes_path"] == str(indexes_path)
 
 
 def test_run_primary_cli_defaults_to_final_classifier_router(
@@ -402,6 +510,53 @@ def test_tune_primary_cli_writes_frozen_settings(tmp_path, monkeypatch) -> None:
     assert diagnostics["best_variant"] == "B2-score"
 
 
+def test_tune_primary_cli_rejects_test_query_id_in_dev_named_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    queries_path = tmp_path / "queries_dev_v2.jsonl"
+    indexes_path = tmp_path / "indexes"
+    output_path = tmp_path / "settings"
+    category_stats_path = tmp_path / "category_stats.json"
+    indexes_path.mkdir()
+    queries_path.write_text(
+        (
+            '{"query_id":"test_q9999","query":"수강신청 변경 기간은?",'
+            '"gold_chunks":["c1"],"reference_answer":"3월입니다.",'
+            '"gold_categories":["학사"],"query_type":"single_category",'
+            '"probabilities":{"학사":0.9,"장학":0.1}}\n'
+        ),
+        encoding="utf-8",
+    )
+    category_stats_path.write_text('{"rows":[]}', encoding="utf-8")
+
+    def fail_if_settings_selection_runs(*args, **kwargs):
+        raise AssertionError("settings selection reached")
+
+    monkeypatch.setattr(cli, "tune_primary_settings", fail_if_settings_selection_runs)
+
+    with pytest.raises(Exception, match="tuning requires dev queries"):
+        cli.main(
+            [
+                "tune-primary",
+                "--queries",
+                str(queries_path),
+                "--indexes",
+                str(indexes_path),
+                "--output",
+                str(output_path),
+                "--category-stats",
+                str(category_stats_path),
+                "--embedding-backend",
+                "hash",
+                "--theta-grid",
+                "0.6",
+                "--fixed-lambda-grid",
+                "0.5",
+            ]
+        )
+
+
 def test_analyze_primary_cli_writes_analysis_artifacts(tmp_path) -> None:
     run_path = tmp_path / "primary"
     output_path = tmp_path / "analysis"
@@ -450,6 +605,41 @@ def test_analyze_primary_cli_writes_analysis_artifacts(tmp_path) -> None:
     assert "Variant별 metric bar chart" in html
 
 
+def test_analyze_primary_cli_rejects_incomplete_variant_coverage(tmp_path) -> None:
+    run_path = tmp_path / "primary"
+    output_path = tmp_path / "analysis"
+    chunks_path = tmp_path / "chunks.parquet"
+    run_path.mkdir()
+    results_path = run_path / "results.jsonl"
+    _write_results_jsonl(results_path)
+    rows = [
+        json.loads(line)
+        for line in results_path.read_text(encoding="utf-8").splitlines()
+    ]
+    results_path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False) + "\n"
+            for row in rows
+            if row["variant"] != "P-score"
+        ),
+        encoding="utf-8",
+    )
+    _write_chunks_parquet(chunks_path)
+
+    with pytest.raises(ValueError, match="missing variants"):
+        cli.main(
+            [
+                "analyze-primary",
+                "--run",
+                str(run_path),
+                "--chunks",
+                str(chunks_path),
+                "--output",
+                str(output_path),
+            ]
+        )
+
+
 def _write_results_jsonl(path) -> None:
     rows = []
     for variant in ["B0", "B1", "B2-score", "P-score"]:
@@ -460,7 +650,7 @@ def _write_results_jsonl(path) -> None:
                 "variant": variant,
                 "query_type": "single_category",
                 "gold_chunks": ["c1"],
-                "gold_categories": ["학사"],
+                "gold_categories": ["학사"], "retrieval_time_ms": 12.5,
                 "query_probabilities": {"학사": 0.9, "장학": 0.1},
                 "routing": {
                     "mode": "unified" if variant == "B0" else "top1",

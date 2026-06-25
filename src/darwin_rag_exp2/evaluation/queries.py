@@ -8,14 +8,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
 
 import orjson
 import pyarrow.parquet as pq
 import yaml
 
 
-REQUIRED_QUERY_FIELDS = {
+LEGACY_QUERY_FIELDS = {
     "query_id",
     "query",
     "gold_chunks",
@@ -23,7 +22,27 @@ REQUIRED_QUERY_FIELDS = {
     "gold_categories",
     "query_type",
 }
+V2_SCHEMA_VERSION = "eval_v3_overlap_aware_rechunked"
+V2_QUERY_FIELDS = {
+    "query_id",
+    "query",
+    "reference_answer",
+    "query_type",
+    "expected_categories",
+    "source_id",
+    "gold_chunk_ids",
+    "neighbor_chunk_ids",
+    "graded_relevance",
+    "requires_multi_category",
+    "gold_category_set",
+    "gold_category_pure",
+    "evidence_unit",
+    "schema_version",
+}
+V2_OPTIONAL_QUERY_FIELDS = {"manual_patch_note", "source_ids"}
+GOLD_CHUNK_FIELDS = {"chunk_id", "source_id", "chunk_index", "relevance", "role"}
 QUERY_TYPES = ("single_category", "multi_category", "ambiguous")
+GOLD_ROLES = ("direct", "direct_overlap", "support")
 
 
 @dataclass(frozen=True)
@@ -224,7 +243,8 @@ def _validate_split_rows(
                 config=config,
             )
         )
-    _validate_non_single_fraction(split, validated, config)
+    if not all(row.get("schema_version") == V2_SCHEMA_VERSION for row in validated):
+        _validate_non_single_fraction(split, validated, config)
     return validated
 
 
@@ -236,11 +256,24 @@ def _validate_row(
     chunk_ids: set[str],
     config: QueryValidationConfig,
 ) -> dict[str, object]:
+    if row.get("schema_version") == V2_SCHEMA_VERSION:
+        return _normalize_v2_row(
+            split,
+            line_number,
+            row,
+            chunk_ids=chunk_ids,
+            config=config,
+        )
+    if "schema_version" in row:
+        raise ValueError(
+            f"{split} line {line_number}: unknown schema_version {row['schema_version']!r}"
+        )
+
     fields = set(row)
-    missing = sorted(REQUIRED_QUERY_FIELDS.difference(fields))
+    missing = sorted(LEGACY_QUERY_FIELDS.difference(fields))
     if missing:
         raise ValueError(f"{split} line {line_number}: missing fields {missing}")
-    extra = sorted(fields.difference(REQUIRED_QUERY_FIELDS))
+    extra = sorted(fields.difference(LEGACY_QUERY_FIELDS))
     if extra:
         raise ValueError(f"{split} line {line_number}: unexpected fields {extra}")
 
@@ -317,6 +350,211 @@ def _validate_row(
     }
 
 
+def _normalize_v2_row(
+    split: str,
+    line_number: int,
+    row: Mapping[str, object],
+    *,
+    chunk_ids: set[str],
+    config: QueryValidationConfig,
+) -> dict[str, object]:
+    fields = set(row)
+    missing = sorted(V2_QUERY_FIELDS.difference(fields))
+    if missing:
+        raise ValueError(f"{split} line {line_number}: missing v2 fields {missing}")
+    extra = sorted(fields.difference(V2_QUERY_FIELDS | V2_OPTIONAL_QUERY_FIELDS))
+    query_id = str(row["query_id"]).strip()
+    if extra:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: unexpected v2 fields {extra}"
+        )
+    prefix = f"{split}_q"
+    if not query_id.startswith(prefix):
+        raise ValueError(
+            f"{split} line {line_number}: query_id {query_id!r} must start with {prefix}"
+        )
+    query = str(row["query"]).strip()
+    if not query:
+        raise ValueError(f"{split} line {line_number} {query_id}: empty query")
+    reference_answer = str(row["reference_answer"]).strip()
+    if not reference_answer:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: empty reference_answer"
+        )
+    if not isinstance(row["source_id"], str) or not row["source_id"].strip():
+        raise ValueError(f"{split} line {line_number} {query_id}: invalid source_id")
+    if "source_ids" in row:
+        source_ids = row["source_ids"]
+        if (
+            not isinstance(source_ids, (list, tuple))
+            or not source_ids
+            or not all(isinstance(source_id, str) and source_id.strip() for source_id in source_ids)
+        ):
+            raise ValueError(f"{split} line {line_number} {query_id}: invalid source_ids")
+    if "manual_patch_note" in row and (
+        not isinstance(row["manual_patch_note"], str) or not row["manual_patch_note"].strip()
+    ):
+        raise ValueError(f"{split} line {line_number} {query_id}: invalid manual_patch_note")
+    if not isinstance(row["evidence_unit"], str) or not row["evidence_unit"].strip():
+        raise ValueError(f"{split} line {line_number} {query_id}: invalid evidence_unit")
+
+    raw_gold_chunks = row["gold_chunk_ids"]
+    if not isinstance(raw_gold_chunks, list) or not raw_gold_chunks:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: gold_chunk_ids must be a non-empty list"
+        )
+    gold_chunk_rows: list[dict[str, object]] = []
+    gold_chunks: list[str] = []
+    for item in raw_gold_chunks:
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: gold_chunk_ids entries must be objects"
+            )
+        item_fields = set(item)
+        if item_fields != GOLD_CHUNK_FIELDS:
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: invalid gold_chunk_ids object shape"
+            )
+        chunk_id = item["chunk_id"]
+        source_id = item["source_id"]
+        chunk_index = item["chunk_index"]
+        relevance = item["relevance"]
+        role = item["role"]
+        if not isinstance(chunk_id, str) or not chunk_id:
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: invalid gold_chunk_ids chunk_id"
+            )
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: invalid gold_chunk_ids source_id"
+            )
+        if isinstance(chunk_index, bool) or not isinstance(chunk_index, int) or chunk_index < 0:
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: invalid gold_chunk_ids chunk_index"
+            )
+        if isinstance(relevance, bool) or relevance not in (1, 2):
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: invalid gold_chunk_ids relevance"
+            )
+        if role not in GOLD_ROLES:
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: invalid gold_chunk_ids role"
+            )
+        gold_chunks.append(chunk_id)
+        gold_chunk_rows.append(dict(item))
+
+    duplicate_chunks = _duplicates(gold_chunks)
+    if duplicate_chunks:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: duplicate gold_chunk_ids {duplicate_chunks}"
+        )
+    unknown_chunks = sorted(chunk for chunk in gold_chunks if chunk not in chunk_ids)
+    if unknown_chunks:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: unknown gold_chunk_ids {unknown_chunks}"
+        )
+
+    neighbor_chunk_ids = _strict_string_list(row["neighbor_chunk_ids"])
+    duplicate_neighbors = _duplicates(neighbor_chunk_ids)
+    if duplicate_neighbors:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: duplicate neighbor_chunk_ids {duplicate_neighbors}"
+        )
+    unknown_neighbors = sorted(chunk for chunk in neighbor_chunk_ids if chunk not in chunk_ids)
+    if unknown_neighbors:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: unknown neighbor_chunk_ids {unknown_neighbors}"
+        )
+    overlapping_neighbors = sorted(set(neighbor_chunk_ids).intersection(gold_chunks))
+    if overlapping_neighbors:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: neighbor_chunk_ids overlap gold chunks {overlapping_neighbors}"
+        )
+
+    graded_relevance = row["graded_relevance"]
+    if not isinstance(graded_relevance, Mapping):
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: graded_relevance must be an object"
+        )
+    graded_keys = {str(chunk_id) for chunk_id in graded_relevance}
+    gold_chunk_set = set(gold_chunks)
+    missing_graded_gold = sorted(gold_chunk_set.difference(graded_keys))
+    if missing_graded_gold:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: graded_relevance must cover gold_chunk_ids"
+        )
+    unknown_graded_chunks = sorted(
+        graded_keys.difference(gold_chunk_set.union(neighbor_chunk_ids))
+    )
+    if unknown_graded_chunks:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: unknown graded_relevance chunks {unknown_graded_chunks}"
+        )
+    normalized_relevance: dict[str, float] = {}
+    for chunk_id, value in graded_relevance.items():
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: graded_relevance values must be numeric"
+            )
+        score = float(value)
+        if score < 0.0 or score > 1.0:
+            raise ValueError(
+                f"{split} line {line_number} {query_id}: graded_relevance values must be in [0, 1]"
+            )
+        normalized_relevance[str(chunk_id)] = score
+
+    allowed_categories = set(config.primary_categories)
+    expected_categories = _valid_categories(
+        split,
+        line_number,
+        query_id,
+        "expected_categories",
+        row["expected_categories"],
+        allowed_categories,
+    )
+    gold_categories = _valid_categories(
+        split,
+        line_number,
+        query_id,
+        "gold_category_set",
+        row["gold_category_set"],
+        allowed_categories,
+    )
+    if set(expected_categories) != set(gold_categories):
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: expected_categories must match gold_category_set"
+        )
+    requires_multi_category = row["requires_multi_category"]
+    if not isinstance(requires_multi_category, bool):
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: requires_multi_category must be boolean"
+        )
+    if requires_multi_category != (len(gold_categories) > 1):
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: requires_multi_category inconsistent with gold_category_set"
+        )
+    if not isinstance(row["gold_category_pure"], bool):
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: gold_category_pure must be boolean"
+        )
+    query_type = str(row["query_type"]).strip()
+    if not query_type:
+        raise ValueError(f"{split} line {line_number} {query_id}: empty query_type")
+
+    return {
+        **dict(row),
+        "query_id": query_id,
+        "query": query,
+        "reference_answer": reference_answer,
+        "query_type": query_type,
+        "gold_chunk_ids": gold_chunk_rows,
+        "neighbor_chunk_ids": neighbor_chunk_ids,
+        "graded_relevance": normalized_relevance,
+        "gold_chunks": gold_chunks,
+        "gold_categories": gold_categories,
+    }
+
+
 def _validate_non_single_fraction(
     split: str,
     rows: Sequence[Mapping[str, object]],
@@ -357,13 +595,24 @@ def _split_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         for query_type, count in query_type_counts.items()
         if query_type != "single_category"
     )
-    return {
+    summary = {
         "row_count": len(rows),
         "query_type_counts": query_type_counts,
         "category_counts": category_counts,
         "non_single_count": non_single_count,
         "non_single_fraction": _metric(non_single_count / len(rows)),
     }
+    schema_versions = [
+        str(row["schema_version"])
+        for row in rows
+        if row.get("schema_version") is not None
+    ]
+    if schema_versions:
+        summary["schema_version_counts"] = {
+            schema_version: count
+            for schema_version, count in sorted(Counter(schema_versions).items())
+        }
+    return summary
 
 
 def _query_hashes(
@@ -402,7 +651,7 @@ def _query_hashes(
 def _canonical_row_sha256(row: Mapping[str, object]) -> str:
     payload = {
         key: row[key]
-        for key in sorted(REQUIRED_QUERY_FIELDS)
+        for key in sorted(row)
     }
     return sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).hexdigest()
 
@@ -452,6 +701,38 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         raise ValueError("expected a JSON array")
     return [str(item) for item in value]
+
+
+def _strict_string_list(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("expected a JSON string array")
+    return list(value)
+
+
+def _valid_categories(
+    split: str,
+    line_number: int,
+    query_id: str,
+    field: str,
+    value: object,
+    allowed_categories: set[str],
+) -> list[str]:
+    categories = _strict_string_list(value)
+    if not categories:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: {field} must not be empty"
+        )
+    duplicates = _duplicates(categories)
+    if duplicates:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: duplicate {field} {duplicates}"
+        )
+    invalid = sorted(category for category in categories if category not in allowed_categories)
+    if invalid:
+        raise ValueError(
+            f"{split} line {line_number} {query_id}: invalid {field} {invalid}"
+        )
+    return categories
 
 
 def _duplicates(values: Sequence[str]) -> list[str]:

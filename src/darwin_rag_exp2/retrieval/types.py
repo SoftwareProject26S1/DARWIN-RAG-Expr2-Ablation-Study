@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -17,6 +17,13 @@ class QueryFeatures:
     gold_chunks: tuple[str, ...] = ()
     gold_categories: tuple[str, ...] = ()
     query_type: str = ""
+    graded_relevance: dict[str, float] = field(default_factory=dict)
+    neighbor_chunk_ids: tuple[str, ...] = ()
+    source_id: str = ""
+    evidence_unit: str = ""
+    schema_version: str = ""
+    requires_multi_category: bool | None = None
+    gold_category_pure: bool | None = None
 
 
 @dataclass(frozen=True)

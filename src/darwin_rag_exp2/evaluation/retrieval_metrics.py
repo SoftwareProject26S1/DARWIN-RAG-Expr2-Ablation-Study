@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 
 def retrieval_metrics_at_k(
@@ -35,6 +35,35 @@ def retrieval_metrics_at_k(
         f"mrr@{k}": _metric(mrr),
         f"ndcg@{k}": _metric(ndcg),
     }
+
+
+def graded_retrieval_metrics_at_k(
+    *,
+    ranked_chunk_ids: Sequence[str],
+    relevance_by_chunk_id: Mapping[str, float],
+    k: int,
+) -> dict[str, float]:
+    if k <= 0:
+        raise ValueError("k must be positive")
+    relevance = {
+        str(chunk_id): float(gain)
+        for chunk_id, gain in relevance_by_chunk_id.items()
+    }
+    if not relevance:
+        raise ValueError("relevance_by_chunk_id must not be empty")
+    top_k = [str(chunk_id) for chunk_id in ranked_chunk_ids[:k]]
+    dcg = sum(
+        relevance.get(chunk_id, 0.0) / math.log2(position + 1)
+        for position, chunk_id in enumerate(top_k, start=1)
+    )
+    ideal_dcg = sum(
+        gain / math.log2(position + 1)
+        for position, gain in enumerate(
+            sorted(relevance.values(), reverse=True)[:k],
+            start=1,
+        )
+    )
+    return {f"graded_ndcg@{k}": _metric(dcg / ideal_dcg if ideal_dcg else 0.0)}
 
 
 def _ndcg_at_k(ranked_chunk_ids: Sequence[str], gold: set[str]) -> float:

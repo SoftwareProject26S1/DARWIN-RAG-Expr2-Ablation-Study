@@ -11,6 +11,7 @@ def test_render_primary_report_html_contains_required_visual_sections() -> None:
     assert "Variant별 metric bar chart" in html
     assert "P-score - B2-score delta 분포 histogram" in html
     assert "query_type/category별 heatmap" in html
+    assert "Retrieval timing" in html
     assert "Route width 분포" in html
     assert "실패 query Top-N" in html
     assert html.count("<svg") >= 4
@@ -20,9 +21,9 @@ def test_render_primary_report_html_contains_required_visual_sections() -> None:
 def test_render_primary_report_html_escapes_query_and_preview_text() -> None:
     analysis = _analysis_payload()
     analysis["failure_cases"][0]["query"] = "<script>alert('x')</script>"
-    analysis["failure_cases"][0]["variants"]["P-score"]["top10"][0][
-        "title"
-    ] = "<b>공지</b>"
+    analysis["failure_cases"][0]["variants"]["P-score"]["top10"][0]["title"] = (
+        "<b>공지</b>"
+    )
 
     html = render_primary_report_html(analysis)
 
@@ -40,10 +41,38 @@ def _analysis_payload() -> dict[str, object]:
             "metric": "ndcg@10",
         },
         "metrics_by_variant": [
-            {"variant": "B0", "query_count": 2, "hit@10": 0.5, "mrr@10": 0.4, "ndcg@10": 0.45, "recall@10": 0.5},
-            {"variant": "B1", "query_count": 2, "hit@10": 0.5, "mrr@10": 0.4, "ndcg@10": 0.45, "recall@10": 0.5},
-            {"variant": "B2-score", "query_count": 2, "hit@10": 0.5, "mrr@10": 0.5, "ndcg@10": 0.5, "recall@10": 0.5},
-            {"variant": "P-score", "query_count": 2, "hit@10": 1.0, "mrr@10": 0.75, "ndcg@10": 0.75, "recall@10": 1.0},
+            {
+                "variant": "B0",
+                "query_count": 2,
+                "hit@10": 0.5,
+                "mrr@10": 0.4,
+                "ndcg@10": 0.45,
+                "recall@10": 0.5,
+            },
+            {
+                "variant": "B1",
+                "query_count": 2,
+                "hit@10": 0.5,
+                "mrr@10": 0.4,
+                "ndcg@10": 0.45,
+                "recall@10": 0.5,
+            },
+            {
+                "variant": "B2-score",
+                "query_count": 2,
+                "hit@10": 0.5,
+                "mrr@10": 0.5,
+                "ndcg@10": 0.5,
+                "recall@10": 0.5,
+            },
+            {
+                "variant": "P-score",
+                "query_count": 2,
+                "hit@10": 1.0,
+                "mrr@10": 0.75,
+                "ndcg@10": 0.75,
+                "recall@10": 1.0,
+            },
         ],
         "paired_comparison": {
             "metric": "ndcg@10",
@@ -61,12 +90,53 @@ def _analysis_payload() -> dict[str, object]:
             {"query_id": "q2", "delta": 0.5, "b2_score": 0.0, "p_score": 0.5},
         ],
         "breakdown_by_query_type": [
-            {"query_type": "single_category", "variant": "P-score", "query_count": 1, "ndcg@10": 1.0},
-            {"query_type": "ambiguous", "variant": "P-score", "query_count": 1, "ndcg@10": 0.5},
+            {
+                "query_type": "single_category",
+                "variant": "P-score",
+                "query_count": 1,
+                "ndcg@10": 1.0,
+            },
+            {
+                "query_type": "ambiguous",
+                "variant": "P-score",
+                "query_count": 1,
+                "ndcg@10": 0.5,
+            },
         ],
         "breakdown_by_gold_category": [
-            {"gold_category": "학사", "variant": "P-score", "query_count": 1, "ndcg@10": 1.0},
-            {"gold_category": "장학", "variant": "P-score", "query_count": 1, "ndcg@10": 0.5},
+            {
+                "gold_category": "학사",
+                "variant": "P-score",
+                "query_count": 1,
+                "ndcg@10": 1.0,
+            },
+            {
+                "gold_category": "장학",
+                "variant": "P-score",
+                "query_count": 1,
+                "ndcg@10": 0.5,
+            },
+        ],
+        "retrieval_time_by_variant": [
+            {
+                "variant": "P-score",
+                "query_count": 2,
+                "retrieval_time_ms_mean": 50.0,
+                "retrieval_time_ms_min": 40.0,
+                "retrieval_time_ms_max": 60.0,
+                "retrieval_time_ms_median": 50.0,
+            },
+        ],
+        "retrieval_time_by_query_type": [
+            {
+                "query_type": "ambiguous",
+                "variant": "P-score",
+                "query_count": 1,
+                "retrieval_time_ms_mean": 60.0,
+                "retrieval_time_ms_min": 60.0,
+                "retrieval_time_ms_max": 60.0,
+                "retrieval_time_ms_median": 60.0,
+            },
         ],
         "routing_diagnostics": [
             {
@@ -98,13 +168,21 @@ def _analysis_payload() -> dict[str, object]:
                         "metric": 0.0,
                         "chunk_hit": False,
                         "source_hit": True,
-                        "top10": [{"chunk_id": "c4", "source_id": "s3", "title": "비슷한 공지"}],
+                        "top10": [
+                            {
+                                "chunk_id": "c4",
+                                "source_id": "s3",
+                                "title": "비슷한 공지",
+                            }
+                        ],
                     },
                     "P-score": {
                         "metric": 0.5,
                         "chunk_hit": True,
                         "source_hit": True,
-                        "top10": [{"chunk_id": "c3", "source_id": "s3", "title": "정답 공지"}],
+                        "top10": [
+                            {"chunk_id": "c3", "source_id": "s3", "title": "정답 공지"}
+                        ],
                     },
                 },
             }

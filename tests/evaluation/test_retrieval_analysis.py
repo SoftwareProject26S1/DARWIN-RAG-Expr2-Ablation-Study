@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from darwin_rag_exp2.evaluation.retrieval_analysis import analyze_primary_results
+import json
+
+import pytest
+
+from darwin_rag_exp2.evaluation.retrieval_analysis import (
+    analyze_primary_results,
+    write_primary_analysis,
+)
 
 
 def test_analyze_primary_results_reports_variant_metrics_and_paired_delta() -> None:
@@ -8,10 +15,7 @@ def test_analyze_primary_results_reports_variant_metrics_and_paired_delta() -> N
 
     analysis = analyze_primary_results(rows, metric_key="ndcg@10", top_failures=5)
 
-    metrics_by_variant = {
-        row["variant"]: row
-        for row in analysis["metrics_by_variant"]
-    }
+    metrics_by_variant = {row["variant"]: row for row in analysis["metrics_by_variant"]}
     assert metrics_by_variant["B2-score"]["ndcg@10"] == 0.5
     assert metrics_by_variant["P-score"]["ndcg@10"] == 0.75
 
@@ -41,10 +45,7 @@ def test_analyze_primary_results_reports_breakdowns_and_variant_equivalence() ->
     }
     assert category_breakdown[("장학", "P-score")]["query_count"] == 1
 
-    equivalence = {
-        row["query_id"]: row
-        for row in analysis["variant_equivalence"]
-    }
+    equivalence = {row["query_id"]: row for row in analysis["variant_equivalence"]}
     assert equivalence["q1"]["b1_b2_p_top10_equal"] is True
     assert equivalence["q2"]["b1_b2_p_top10_equal"] is False
 
@@ -68,22 +69,98 @@ def test_analyze_primary_results_reports_routing_and_strict_gold_failures() -> N
     )
 
     routing_by_variant = {
-        row["variant"]: row
-        for row in analysis["routing_diagnostics"]
+        row["variant"]: row for row in analysis["routing_diagnostics"]
     }
     assert routing_by_variant["B2-score"]["route_width_mean"] == 1.5
     assert routing_by_variant["B2-score"]["route_width_1_rate"] == 0.5
     assert routing_by_variant["B2-score"]["route_width_ge2_rate"] == 0.5
     assert routing_by_variant["B2-score"]["top1_fallback_rate"] == 0.5
 
-    failure_by_query = {
-        row["query_id"]: row
-        for row in analysis["failure_cases"]
-    }
+    failure_by_query = {row["query_id"]: row for row in analysis["failure_cases"]}
     b2_failure = failure_by_query["q2"]["variants"]["B2-score"]
     assert b2_failure["chunk_hit"] is False
     assert b2_failure["source_hit"] is True
     assert b2_failure["top10"][0]["chunk_id"] == "c4"
+
+
+def test_analyze_primary_results_reports_retrieval_time_summaries() -> None:
+    rows = _sample_result_rows()
+
+    analysis = analyze_primary_results(rows, metric_key="ndcg@10", top_failures=5)
+
+    by_variant = {row["variant"]: row for row in analysis["retrieval_time_by_variant"]}
+    assert by_variant["B0"] == {
+        "variant": "B0",
+        "query_count": 2,
+        "retrieval_time_ms_mean": 20.0,
+        "retrieval_time_ms_min": 10.0,
+        "retrieval_time_ms_max": 30.0,
+        "retrieval_time_ms_median": 20.0,
+    }
+
+    by_query_type = {
+        (row["query_type"], row["variant"]): row
+        for row in analysis["retrieval_time_by_query_type"]
+    }
+    assert by_query_type[("ambiguous", "P-score")] == {
+        "query_type": "ambiguous",
+        "variant": "P-score",
+        "query_count": 1,
+        "retrieval_time_ms_mean": 60.0,
+        "retrieval_time_ms_min": 60.0,
+        "retrieval_time_ms_max": 60.0,
+        "retrieval_time_ms_median": 60.0,
+    }
+
+
+def test_analyze_primary_results_rejects_rows_missing_retrieval_time() -> None:
+    rows = _sample_result_rows()
+    del rows[0]["retrieval_time_ms"]
+
+    with pytest.raises(ValueError, match="retrieval_time_ms"):
+        analyze_primary_results(rows, metric_key="ndcg@10", top_failures=5)
+
+
+def test_analyze_primary_results_preserves_v2_metadata_in_diagnostics() -> None:
+    rows = _sample_result_rows()
+
+    analysis = analyze_primary_results(rows, metric_key="ndcg@10", top_failures=5)
+
+    paired_by_query = {row["query_id"]: row for row in analysis["paired_deltas"]}
+    assert paired_by_query["q2"]["schema_version"] == "eval_v3_overlap_aware_rechunked"
+    assert paired_by_query["q2"]["evidence_unit"] == "chunk"
+    assert paired_by_query["q2"]["source_id"] == "s3"
+    assert paired_by_query["q2"]["neighbor_chunk_ids"] == "c2,c4"
+    assert paired_by_query["q2"]["graded_relevance"] == '{"c3":1.0}'
+
+    failure_by_query = {row["query_id"]: row for row in analysis["failure_cases"]}
+    failure = failure_by_query["q2"]
+    assert failure["schema_version"] == "eval_v3_overlap_aware_rechunked"
+    assert failure["evidence_unit"] == "chunk"
+    assert failure["source_id"] == "s3"
+    assert failure["neighbor_chunk_ids"] == ["c2", "c4"]
+    assert failure["graded_relevance"] == {"c3": 1.0}
+    assert failure["variants"]["B2-score"]["neighbor_hit"] is True
+
+
+def test_write_primary_analysis_includes_timing_artifacts_in_manifest(tmp_path) -> None:
+    analysis = analyze_primary_results(
+        _sample_result_rows(),
+        metric_key="ndcg@10",
+        top_failures=5,
+    )
+
+    write_primary_analysis(
+        output_dir=tmp_path,
+        analysis=analysis,
+        run_dir=tmp_path / "run",
+    )
+
+    assert (tmp_path / "retrieval_time_by_variant.csv").exists()
+    assert (tmp_path / "retrieval_time_by_query_type.csv").exists()
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert "retrieval_time_by_variant.csv" in manifest["artifact_files"]
+    assert "retrieval_time_by_query_type.csv" in manifest["artifact_files"]
 
 
 def test_analyze_primary_results_supports_legacy_rows_without_routing() -> None:
@@ -104,8 +181,7 @@ def test_analyze_primary_results_supports_legacy_rows_without_routing() -> None:
 
     assert analysis["summary"]["legacy_row_count"] == len(legacy_rows)
     routing_by_variant = {
-        row["variant"]: row
-        for row in analysis["routing_diagnostics"]
+        row["variant"]: row for row in analysis["routing_diagnostics"]
     }
     assert routing_by_variant["B2-score"]["legacy_rows"] == 2
     assert routing_by_variant["B2-score"]["route_width_mean"] == 1.0
@@ -140,36 +216,45 @@ def _sample_result_rows() -> list[dict[str, object]]:
             },
         )
     )
-    rows.extend(
-        _query_rows(
-            query_id="q2",
-            query="장학 안내가 맞는지 애매한데 신청 기간을 알려줘",
-            query_type="ambiguous",
-            gold_chunks=["c3"],
-            gold_categories=["장학"],
-            metrics_by_variant={
-                "B0": 0.0,
-                "B1": 0.0,
-                "B2-score": 0.0,
-                "P-score": 0.5,
-            },
-            top10_by_variant={
-                "B0": [_hit("c2", "s2", "학사", None)],
-                "B1": [_hit("c4", "s3", "장학", "장학")],
-                "B2-score": [_hit("c4", "s3", "장학", "장학")],
-                "P-score": [
-                    _hit("c5", "s5", "학사", "학사"),
-                    _hit("c3", "s3", "장학", "장학", rank=2),
-                ],
-            },
-            routing_by_variant={
-                "B0": _routing("unified", "장학", [], 0),
-                "B1": _routing("top1", "장학", ["장학"], 1),
-                "B2-score": _routing("soft_threshold", "장학", ["장학", "학사"], 2),
-                "P-score": _routing("soft_threshold", "장학", ["장학", "학사"], 2),
-            },
-        )
+    q2_rows = _query_rows(
+        query_id="q2",
+        query="장학 안내가 맞는지 애매한데 신청 기간을 알려줘",
+        query_type="ambiguous",
+        gold_chunks=["c3"],
+        gold_categories=["장학"],
+        metrics_by_variant={
+            "B0": 0.0,
+            "B1": 0.0,
+            "B2-score": 0.0,
+            "P-score": 0.5,
+        },
+        top10_by_variant={
+            "B0": [_hit("c2", "s2", "학사", None)],
+            "B1": [_hit("c4", "s3", "장학", "장학")],
+            "B2-score": [_hit("c4", "s3", "장학", "장학")],
+            "P-score": [
+                _hit("c5", "s5", "학사", "학사"),
+                _hit("c3", "s3", "장학", "장학", rank=2),
+            ],
+        },
+        routing_by_variant={
+            "B0": _routing("unified", "장학", [], 0),
+            "B1": _routing("top1", "장학", ["장학"], 1),
+            "B2-score": _routing("soft_threshold", "장학", ["장학", "학사"], 2),
+            "P-score": _routing("soft_threshold", "장학", ["장학", "학사"], 2),
+        },
     )
+    for row in q2_rows:
+        row.update(
+            {
+                "schema_version": "eval_v3_overlap_aware_rechunked",
+                "evidence_unit": "chunk",
+                "source_id": "s3",
+                "neighbor_chunk_ids": ["c2", "c4"],
+                "graded_relevance": {"c3": 1.0},
+            }
+        )
+    rows.extend(q2_rows)
     return rows
 
 
@@ -185,6 +270,13 @@ def _query_rows(
     routing_by_variant: dict[str, dict[str, object]],
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
+    retrieval_time_by_variant = {
+        "B0": 10.0,
+        "B1": 20.0,
+        "B2-score": 30.0,
+        "P-score": 40.0,
+    }
+    query_time_offset = 20.0 if query_id == "q2" else 0.0
     for variant, ndcg in metrics_by_variant.items():
         top10 = top10_by_variant[variant]
         rows.append(
@@ -203,6 +295,8 @@ def _query_rows(
                     "ndcg@10": ndcg,
                     "recall@10": 1.0 if ndcg > 0.0 else 0.0,
                 },
+                "retrieval_time_ms": retrieval_time_by_variant[variant]
+                + query_time_offset,
                 "top10": top10,
                 "top5_contexts": top10[:1],
             }

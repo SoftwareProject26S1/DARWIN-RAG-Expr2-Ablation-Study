@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from html import escape
-from typing import Any
 
 
 METRIC_KEYS = ("hit@10", "mrr@10", "ndcg@10", "recall@10")
@@ -44,6 +43,10 @@ def render_primary_report_html(analysis: Mapping[str, object]) -> str:
                 _rows(analysis.get("breakdown_by_query_type")),
                 _rows(analysis.get("breakdown_by_gold_category")),
                 str(summary.get("metric", "ndcg@10")),
+            ),
+            _timing_section(
+                _rows(analysis.get("retrieval_time_by_variant")),
+                _rows(analysis.get("retrieval_time_by_query_type")),
             ),
             _route_width_section(_rows(analysis.get("routing_diagnostics"))),
             _failure_table_section(_rows(analysis.get("failure_cases"))),
@@ -195,9 +198,7 @@ def _delta_histogram_svg(deltas: Sequence[Mapping[str, object]]) -> str:
                 title=escape(f"{low:.3f} to {high:.3f}: {count}"),
             )
         )
-    parts.append(
-        f'<text x="{margin_left}" y="{height - 20}">{min_value:.3f}</text>'
-    )
+    parts.append(f'<text x="{margin_left}" y="{height - 20}">{min_value:.3f}</text>')
     parts.append(
         f'<text x="{width - 60}" y="{height - 20}" text-anchor="end">{max_value:.3f}</text>'
     )
@@ -236,7 +237,9 @@ def _heatmap_svg(
         if any(str(row.get("variant")) == variant for row in rows)
     ]
     if not labels or not variants:
-        return '<svg viewBox="0 0 900 90"><text x="24" y="44">No heatmap rows</text></svg>'
+        return (
+            '<svg viewBox="0 0 900 90"><text x="24" y="44">No heatmap rows</text></svg>'
+        )
     cell_width = 120
     cell_height = 34
     label_width = 180
@@ -244,7 +247,9 @@ def _heatmap_svg(
     width = label_width + cell_width * len(variants) + 28
     height = top + cell_height * len(labels) + 24
     by_cell = {
-        (str(row.get(label_key, "")), str(row.get("variant", ""))): _float(row.get(metric))
+        (str(row.get(label_key, "")), str(row.get("variant", ""))): _float(
+            row.get(metric)
+        )
         for row in rows
     }
     parts: list[str] = []
@@ -285,9 +290,15 @@ def _heatmap_table(
     metric: str,
 ) -> str:
     labels = sorted({str(row.get(label_key, "")) for row in rows})
-    variants = [variant for variant in ("B0", "B1", "B2-score", "P-score") if any(str(row.get("variant")) == variant for row in rows)]
+    variants = [
+        variant
+        for variant in ("B0", "B1", "B2-score", "P-score")
+        if any(str(row.get("variant")) == variant for row in rows)
+    ]
     by_cell = {
-        (str(row.get(label_key, "")), str(row.get("variant", ""))): _float(row.get(metric))
+        (str(row.get(label_key, "")), str(row.get("variant", ""))): _float(
+            row.get(metric)
+        )
         for row in rows
     }
     header = "<tr><th>{}</th>{}</tr>".format(
@@ -328,6 +339,35 @@ def _route_width_section(rows: Sequence[Mapping[str, object]]) -> str:
             ],
         )
         + "</section>"
+    )
+
+
+def _timing_section(
+    variant_rows: Sequence[Mapping[str, object]],
+    query_type_rows: Sequence[Mapping[str, object]],
+) -> str:
+    return (
+        '<section class="panel">'
+        "<h2>Retrieval timing</h2>"
+        "<h3>variant</h3>"
+        + _table(variant_rows, preferred_columns=_timing_columns("variant"))
+        + "<h3>query_type + variant</h3>"
+        + _table(
+            query_type_rows,
+            preferred_columns=_timing_columns("query_type", "variant"),
+        )
+        + "</section>"
+    )
+
+
+def _timing_columns(*keys: str) -> tuple[str, ...]:
+    return (
+        *keys,
+        "query_count",
+        "retrieval_time_ms_mean",
+        "retrieval_time_ms_min",
+        "retrieval_time_ms_max",
+        "retrieval_time_ms_median",
     )
 
 
@@ -433,7 +473,9 @@ def _table(
 ) -> str:
     if not rows:
         return '<p class="empty">No rows</p>'
-    columns = [column for column in preferred_columns if any(column in row for row in rows)]
+    columns = [
+        column for column in preferred_columns if any(column in row for row in rows)
+    ]
     for row in rows:
         for key in row:
             key_string = str(key)

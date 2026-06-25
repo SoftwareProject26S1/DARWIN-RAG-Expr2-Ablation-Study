@@ -3,12 +3,46 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
+from darwin_rag_exp2.evaluation.queries import V2_SCHEMA_VERSION
 from darwin_rag_exp2.evaluation.retrieval_metrics import retrieval_metrics_at_k
 
 from .settings import build_lambda_by_category
 from .types import PrimaryRunSettings, QueryFeatures, SearchBackend
 from .variants import run_b2_score, run_p_score
+
+QueryRowValue = str | int | float | bool | list[str] | dict[str, float] | None
+
+
+class TuningQueryPathError(ValueError):
+    def __init__(self) -> None:
+        super().__init__("tuning requires dev queries")
+
+
+def tuning_query_metadata(queries_path: Path, *, metric_key: str) -> dict[str, str]:
+    tokens = queries_path.stem.lower().replace("-", "_").split("_")
+    if "dev" not in tokens or "test" in tokens:
+        raise TuningQueryPathError()
+    metadata = {
+        "queries_path": str(queries_path),
+        "query_file": queries_path.name,
+        "query_split": "dev",
+        "metric_key": metric_key,
+    }
+    if queries_path.name == "queries_dev_v2.jsonl":
+        metadata["schema_version"] = V2_SCHEMA_VERSION
+    return metadata
+
+
+def validate_tuning_query_rows(
+    query_rows: Sequence[Mapping[str, QueryRowValue]],
+) -> None:
+    for row in query_rows:
+        query_id = str(row.get("query_id", ""))
+        split = str(row.get("query_split") or row.get("split") or "").lower()
+        if query_id.startswith("test_") or split == "test":
+            raise TuningQueryPathError()
 
 
 def tune_primary_settings(

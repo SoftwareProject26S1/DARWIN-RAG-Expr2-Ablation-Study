@@ -1,3 +1,8 @@
+from pathlib import Path
+
+import pytest
+
+from darwin_rag_exp2.retrieval import tuning
 from darwin_rag_exp2.retrieval.tuning import (
     tune_adaptive_lambda_parameters,
     tune_primary_settings,
@@ -97,3 +102,34 @@ def test_tune_adaptive_lambda_parameters_selects_p_score_dev_ndcg() -> None:
         "tau": 0.5,
     }
     assert tuned_settings.lambda_by_category["장학"] < 0.01
+
+
+def test_tuning_query_metadata_records_dev_v2_lineage_and_metric() -> None:
+    metadata = tuning.tuning_query_metadata(
+        Path("data/annotations/queries_dev_v2.jsonl"),
+        metric_key="ndcg@10",
+    )
+
+    assert metadata == {
+        "queries_path": "data/annotations/queries_dev_v2.jsonl",
+        "query_file": "queries_dev_v2.jsonl",
+        "query_split": "dev",
+        "schema_version": "eval_v3_overlap_aware_rechunked",
+        "metric_key": "ndcg@10",
+    }
+
+
+def test_tuning_query_metadata_rejects_test_v2_queries() -> None:
+    with pytest.raises(ValueError, match="tuning requires dev queries"):
+        tuning.tuning_query_metadata(
+            Path("data/annotations/queries_test_v2.jsonl"),
+            metric_key="ndcg@10",
+        )
+
+
+def test_tuning_query_metadata_rejects_notdev_filename() -> None:
+    with pytest.raises(ValueError, match="tuning requires dev queries"):
+        tuning.tuning_query_metadata(
+            Path("queries_notdev_v2.jsonl"),
+            metric_key="ndcg@10",
+        )

@@ -59,6 +59,8 @@ from .retrieval.settings import (
 from .retrieval.tuning import (
     tune_adaptive_lambda_parameters,
     tune_primary_settings,
+    tuning_query_metadata,
+    validate_tuning_query_rows,
 )
 from .retrieval.variants import SEARCH_MODES
 
@@ -506,10 +508,18 @@ def tune_primary_command(
 
     if not category_stats_path.exists():
         raise typer.BadParameter(f"missing category stats: {category_stats_path}")
+    try:
+        query_metadata = tuning_query_metadata(queries_path, metric_key=metric_key)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
     config = load_indexing_config(config_path)
     retrieval_defaults = _retrieval_defaults_from_config(config_path)
     model_name = embedding_model_name or config.embedding_model
     query_rows = load_query_rows(queries_path)
+    try:
+        validate_tuning_query_rows(query_rows)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
     embedding_model = _load_embedding_model(embedding_backend, model_name)
     embeddings_by_query_id = embed_query_rows(
         query_rows,
@@ -576,7 +586,9 @@ def tune_primary_command(
     )
     diagnostics = {
         **diagnostics,
+        **query_metadata,
         "query_count": len(query_features),
+        "query_lineage": query_metadata,
         "probability_source": probability_source,
         "adaptive_lambda": adaptive_diagnostics["best_parameters"],
         "p_score_tuning": adaptive_diagnostics,
@@ -696,6 +708,13 @@ def run_primary_command(
         settings=settings,
         run_metadata={
             "queries_path": str(queries_path),
+            "schema_versions": sorted(
+                {
+                    str(row["schema_version"])
+                    for row in query_rows
+                    if row.get("schema_version")
+                }
+            ),
             "settings_path": str(settings_path),
             "indexes_path": str(indexes_path),
             "config_path": str(config_path),
@@ -735,6 +754,7 @@ def analyze_primary_command(
     """Analyze Phase 9 primary retrieval results and write an HTML report."""
 
     result_rows = load_primary_result_rows(run_path)
+    _validate_primary_variant_coverage(result_rows)
     chunk_lookup = load_chunk_lookup(chunks_path)
     analysis = analyze_primary_results(
         result_rows,
@@ -755,6 +775,24 @@ def analyze_primary_command(
         f"Wrote Phase 9 retrieval analysis to {output_path} "
         f"({summary['query_count']} queries, metric={metric_key})"
     )
+
+
+def _validate_primary_variant_coverage(result_rows: Sequence[dict[str, object]]) -> None:
+    expected_variants = {"B0", "B1", "B2-score", "P-score"}
+    variants_by_query: dict[str, list[str]] = {}
+    for row in result_rows:
+        variants_by_query.setdefault(str(row["query_id"]), []).append(
+            str(row["variant"])
+        )
+    for query_id, variants in variants_by_query.items():
+        variant_set = set(variants)
+        if variant_set != expected_variants or len(variants) != len(expected_variants):
+            missing = sorted(expected_variants.difference(variant_set))
+            unexpected = sorted(variant_set.difference(expected_variants))
+            raise ValueError(
+                f"query {query_id} missing variants {missing}; "
+                f"unexpected variants {unexpected}"
+            )
 
 
 @app.command("serve-api")

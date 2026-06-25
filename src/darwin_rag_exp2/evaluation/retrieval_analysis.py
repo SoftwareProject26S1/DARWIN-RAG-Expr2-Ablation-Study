@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 CANONICAL_VARIANTS = ("B0", "B1", "B2-score", "P-score")
 PRIMARY_PAIR = ("B2-score", "P-score")
 DEFAULT_METRIC_KEYS = ("hit@10", "mrr@10", "ndcg@10", "recall@10")
+V2_SCALAR_METADATA = ("schema_version", "evidence_unit", "source_id")
 
 
 def load_primary_result_rows(run_dir: Path) -> list[dict[str, object]]:
@@ -89,12 +90,16 @@ def analyze_primary_results(
             "legacy_row_count": sum(1 for row in rows if "routing" not in row),
         },
         "metrics_by_variant": _metrics_by_variant(rows, variants, metric_keys),
-        "breakdown_by_query_type": _breakdown_by_query_type(rows, variants, metric_keys),
+        "breakdown_by_query_type": _breakdown_by_query_type(
+            rows, variants, metric_keys
+        ),
         "breakdown_by_gold_category": _breakdown_by_gold_category(
             rows,
             variants,
             metric_keys,
         ),
+        "retrieval_time_by_variant": _retrieval_time_by_variant(rows, variants),
+        "retrieval_time_by_query_type": _retrieval_time_by_query_type(rows, variants),
         "paired_comparison": _paired_comparison(
             paired_deltas,
             metric_key=metric_key,
@@ -131,6 +136,8 @@ def write_primary_analysis(
         "metrics_by_variant.csv",
         "breakdown_by_query_type.csv",
         "breakdown_by_gold_category.csv",
+        "retrieval_time_by_variant.csv",
+        "retrieval_time_by_query_type.csv",
         "paired_comparison.json",
         "paired_deltas.csv",
         "routing_diagnostics.csv",
@@ -149,6 +156,14 @@ def write_primary_analysis(
     _write_csv(
         output_dir / "breakdown_by_gold_category.csv",
         analysis["breakdown_by_gold_category"],
+    )
+    _write_csv(
+        output_dir / "retrieval_time_by_variant.csv",
+        analysis["retrieval_time_by_variant"],
+    )
+    _write_csv(
+        output_dir / "retrieval_time_by_query_type.csv",
+        analysis["retrieval_time_by_query_type"],
     )
     _write_json(output_dir / "paired_comparison.json", analysis["paired_comparison"])
     _write_csv(output_dir / "paired_deltas.csv", analysis["paired_deltas"])
@@ -287,13 +302,80 @@ def _mean_metrics(
 ) -> dict[str, float]:
     means: dict[str, float] = {}
     for key in metric_keys:
-        values = [
-            float(_metrics(row)[key])
-            for row in rows
-            if key in _metrics(row)
-        ]
+        values = [float(_metrics(row)[key]) for row in rows if key in _metrics(row)]
         means[key] = _metric(sum(values) / len(values)) if values else 0.0
     return means
+
+
+def _retrieval_time_by_variant(
+    rows: Sequence[Mapping[str, object]],
+    variants: Sequence[str],
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for variant in variants:
+        variant_rows = [row for row in rows if str(row["variant"]) == variant]
+        result: dict[str, object] = {
+            "variant": variant,
+            "query_count": len(variant_rows),
+        }
+        result.update(_retrieval_time_stats(variant_rows))
+        output.append(result)
+    return output
+
+
+def _retrieval_time_by_query_type(
+    rows: Sequence[Mapping[str, object]],
+    variants: Sequence[str],
+) -> list[dict[str, object]]:
+    query_types = sorted({str(row.get("query_type", "")) for row in rows})
+    output: list[dict[str, object]] = []
+    for query_type in query_types:
+        for variant in variants:
+            group_rows = [
+                row
+                for row in rows
+                if str(row.get("query_type", "")) == query_type
+                and str(row["variant"]) == variant
+            ]
+            if not group_rows:
+                continue
+            result: dict[str, object] = {
+                "query_type": query_type,
+                "variant": variant,
+                "query_count": len(group_rows),
+            }
+            result.update(_retrieval_time_stats(group_rows))
+            output.append(result)
+    return output
+
+
+def _retrieval_time_stats(rows: Sequence[Mapping[str, object]]) -> dict[str, float]:
+    values = [_retrieval_time_ms(row) for row in rows]
+    if not values:
+        return {
+            "retrieval_time_ms_mean": 0.0,
+            "retrieval_time_ms_min": 0.0,
+            "retrieval_time_ms_max": 0.0,
+            "retrieval_time_ms_median": 0.0,
+        }
+    return {
+        "retrieval_time_ms_mean": _metric(sum(values) / len(values)),
+        "retrieval_time_ms_min": _metric(min(values)),
+        "retrieval_time_ms_max": _metric(max(values)),
+        "retrieval_time_ms_median": _metric(median(values)),
+    }
+
+
+def _retrieval_time_ms(row: Mapping[str, object]) -> float:
+    value = row.get("retrieval_time_ms")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        query_id = str(row.get("query_id", ""))
+        variant = str(row.get("variant", ""))
+        raise ValueError(
+            "result row must contain numeric retrieval_time_ms"
+            f" for query_id={query_id!r}, variant={variant!r}"
+        )
+    return float(value)
 
 
 def _paired_deltas(
@@ -311,19 +393,19 @@ def _paired_deltas(
         right = by_variant[right_variant]
         left_value = float(_metrics(left)[metric_key])
         right_value = float(_metrics(right)[metric_key])
-        rows.append(
-            {
-                "query_id": query_id,
-                "query": str(right.get("query", left.get("query", ""))),
-                "query_type": str(right.get("query_type", left.get("query_type", ""))),
-                "gold_categories": ",".join(
-                    _string_list(right.get("gold_categories", left.get("gold_categories")))
-                ),
-                "b2_score": _metric(left_value),
-                "p_score": _metric(right_value),
-                "delta": _metric(right_value - left_value),
-            }
-        )
+        payload = {
+            "query_id": query_id,
+            "query": str(right.get("query", left.get("query", ""))),
+            "query_type": str(right.get("query_type", left.get("query_type", ""))),
+            "gold_categories": ",".join(
+                _string_list(right.get("gold_categories", left.get("gold_categories")))
+            ),
+            "b2_score": _metric(left_value),
+            "p_score": _metric(right_value),
+            "delta": _metric(right_value - left_value),
+        }
+        payload.update(_csv_metadata_payload(right))
+        rows.append(payload)
     return rows
 
 
@@ -372,8 +454,12 @@ def _routing_diagnostics(
                 "route_width_mean": _metric(sum(widths) / count) if count else 0.0,
                 "route_width_1_rate": _rate(widths, lambda value: value == 1),
                 "route_width_ge2_rate": _rate(widths, lambda value: value >= 2),
-                "top1_fallback_rate": _rate(modes, lambda value: value == "top1_fallback"),
-                "soft_threshold_rate": _rate(modes, lambda value: value == "soft_threshold"),
+                "top1_fallback_rate": _rate(
+                    modes, lambda value: value == "top1_fallback"
+                ),
+                "soft_threshold_rate": _rate(
+                    modes, lambda value: value == "soft_threshold"
+                ),
                 "top1_rate": _rate(modes, lambda value: value == "top1"),
                 "unified_rate": _rate(modes, lambda value: value == "unified"),
             }
@@ -398,7 +484,9 @@ def _variant_equivalence(
                 "query_id": query_id,
                 "query": str(sample.get("query", "")),
                 "query_type": str(sample.get("query_type", "")),
-                "gold_categories": ",".join(_string_list(sample.get("gold_categories"))),
+                "gold_categories": ",".join(
+                    _string_list(sample.get("gold_categories"))
+                ),
                 "b1_b2_top10_equal": b1_ids == b2_ids,
                 "b2_p_top10_equal": b2_ids == p_ids,
                 "b1_b2_p_top10_equal": b1_ids == b2_ids == p_ids,
@@ -435,16 +523,16 @@ def _failure_cases(
                 has_failure = True
         if not has_failure:
             continue
-        candidates.append(
-            {
-                "query_id": query_id,
-                "query": str(sample.get("query", "")),
-                "query_type": str(sample.get("query_type", "")),
-                "gold_chunks": _string_list(sample.get("gold_chunks")),
-                "gold_categories": _string_list(sample.get("gold_categories")),
-                "variants": variants,
-            }
-        )
+        payload = {
+            "query_id": query_id,
+            "query": str(sample.get("query", "")),
+            "query_type": str(sample.get("query_type", "")),
+            "gold_chunks": _string_list(sample.get("gold_chunks")),
+            "gold_categories": _string_list(sample.get("gold_categories")),
+            "variants": variants,
+        }
+        payload.update(_metadata_payload(sample))
+        candidates.append(payload)
     candidates.sort(key=lambda row: (_failure_sort_metric(row), str(row["query_id"])))
     return candidates[:top_failures] if top_failures else []
 
@@ -459,18 +547,57 @@ def _failure_variant_payload(
     gold_sources = {
         str(chunk_lookup[chunk_id].get("source_id"))
         for chunk_id in gold_chunks
-        if chunk_id in chunk_lookup and chunk_lookup[chunk_id].get("source_id") is not None
+        if chunk_id in chunk_lookup
+        and chunk_lookup[chunk_id].get("source_id") is not None
     }
+    neighbor_chunk_ids = set(_string_list(row.get("neighbor_chunk_ids")))
     top10 = [_enrich_hit(hit, chunk_lookup) for hit in _top_hits(row)]
     top_chunk_ids = {str(hit.get("chunk_id")) for hit in top10}
-    top_source_ids = {str(hit.get("source_id")) for hit in top10 if hit.get("source_id")}
+    top_source_ids = {
+        str(hit.get("source_id")) for hit in top10 if hit.get("source_id")
+    }
     return {
         "metric": _metric(float(_metrics(row).get(metric_key, 0.0))),
         "chunk_hit": bool(gold_chunks.intersection(top_chunk_ids)),
-        "source_hit": bool(gold_sources.intersection(top_source_ids)) if gold_sources else None,
+        "neighbor_hit": bool(neighbor_chunk_ids.intersection(top_chunk_ids))
+        if neighbor_chunk_ids
+        else None,
+        "source_hit": bool(gold_sources.intersection(top_source_ids))
+        if gold_sources
+        else None,
         "routing": _routing_payload(row),
         "top10": top10,
     }
+
+
+def _metadata_payload(row: Mapping[str, object]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key in V2_SCALAR_METADATA:
+        value = row.get(key)
+        if value is not None:
+            payload[key] = str(value)
+    neighbor_chunk_ids = _string_list(row.get("neighbor_chunk_ids"))
+    if neighbor_chunk_ids:
+        payload["neighbor_chunk_ids"] = neighbor_chunk_ids
+    graded_relevance = row.get("graded_relevance")
+    if isinstance(graded_relevance, Mapping):
+        payload["graded_relevance"] = dict(graded_relevance)
+    return payload
+
+
+def _csv_metadata_payload(row: Mapping[str, object]) -> dict[str, object]:
+    payload = _metadata_payload(row)
+    if "neighbor_chunk_ids" in payload:
+        payload["neighbor_chunk_ids"] = ",".join(
+            _string_list(payload["neighbor_chunk_ids"])
+        )
+    graded_relevance = payload.get("graded_relevance")
+    if isinstance(graded_relevance, Mapping):
+        payload["graded_relevance"] = orjson.dumps(
+            graded_relevance,
+            option=orjson.OPT_SORT_KEYS,
+        ).decode("utf-8")
+    return payload
 
 
 def _enrich_hit(
@@ -494,14 +621,10 @@ def _failure_sort_metric(row: Mapping[str, object]) -> tuple[float, float]:
     p_payload = variants.get("P-score")
     b2_payload = variants.get("B2-score")
     p_value = (
-        float(p_payload.get("metric", 1.0))
-        if isinstance(p_payload, Mapping)
-        else 1.0
+        float(p_payload.get("metric", 1.0)) if isinstance(p_payload, Mapping) else 1.0
     )
     b2_value = (
-        float(b2_payload.get("metric", 1.0))
-        if isinstance(b2_payload, Mapping)
-        else 1.0
+        float(b2_payload.get("metric", 1.0)) if isinstance(b2_payload, Mapping) else 1.0
     )
     return (p_value, b2_value)
 
@@ -558,11 +681,7 @@ def _top_hits(row: Mapping[str, object]) -> list[dict[str, object]]:
     top10 = row.get("top10")
     if not isinstance(top10, list):
         return []
-    return [
-        dict(hit)
-        for hit in top10
-        if isinstance(hit, Mapping)
-    ]
+    return [dict(hit) for hit in top10 if isinstance(hit, Mapping)]
 
 
 def _top_chunk_ids(row: Mapping[str, object]) -> list[str]:
@@ -610,7 +729,9 @@ def _wilcoxon_signed_rank_p_value(deltas: Sequence[float]) -> float:
     if not nonzero:
         return 1.0
     ranks = _absolute_ranks(nonzero)
-    observed = sum(rank for value, rank in zip(nonzero, ranks, strict=True) if value > 0)
+    observed = sum(
+        rank for value, rank in zip(nonzero, ranks, strict=True) if value > 0
+    )
     total = sum(ranks)
     if len(ranks) <= 20:
         possible = [0.0]
@@ -644,8 +765,7 @@ def _absolute_ranks(values: Sequence[float]) -> list[float]:
 
 def _write_json(path: Path, payload: object) -> None:
     path.write_bytes(
-        orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
-        + b"\n"
+        orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n"
     )
 
 
