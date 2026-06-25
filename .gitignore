@@ -20,6 +20,7 @@ data/annotations/
 *.parquet
 *.tar.gz
 *.log
+journal-resources/
 
 # OS files
 .DS_Store

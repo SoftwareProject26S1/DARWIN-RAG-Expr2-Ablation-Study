@@ -117,6 +117,37 @@ def test_build_embedding_artifacts_writes_vectors_id_map_and_manifest(tmp_path) 
     assert manifest["id_map_sha256"] == result.manifest["id_map_sha256"]
 
 
+def test_build_embedding_artifacts_encodes_embedding_text(tmp_path) -> None:
+    chunks_path = tmp_path / "chunks.parquet"
+    output_path = tmp_path / "embeddings"
+    embedding_model = RecordingEmbeddingModel()
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                chunk_row(
+                    "c1",
+                    "s1",
+                    "학사",
+                    "본문만",
+                    embedding_text="제목 포함\n\n본문만",
+                ),
+            ]
+        ),
+        chunks_path,
+    )
+
+    build_embedding_artifacts(
+        chunks_path=chunks_path,
+        output_dir=output_path,
+        embedding_model=embedding_model,
+        embedding_model_name="recording",
+        normalize_embeddings=False,
+        similarity_metric="cosine_via_inner_product",
+    )
+
+    assert embedding_model.encoded_texts == ["제목 포함\n\n본문만"]
+
+
 def test_load_embedding_artifacts_rejects_chunk_id_order_mismatch(tmp_path) -> None:
     chunks_path = tmp_path / "chunks.parquet"
     output_path = tmp_path / "embeddings"
@@ -171,10 +202,22 @@ def chunk_row(
     source_id: str,
     category: str,
     body_text: str,
+    *,
+    embedding_text: str | None = None,
 ) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
         "source_id": source_id,
         "category": category,
         "body_text": body_text,
+        "embedding_text": embedding_text or body_text,
     }
+
+
+class RecordingEmbeddingModel:
+    def __init__(self) -> None:
+        self.encoded_texts: list[str] = []
+
+    def encode(self, texts) -> list[list[float]]:
+        self.encoded_texts = list(texts)
+        return [[1.0, 0.0] for _ in self.encoded_texts]

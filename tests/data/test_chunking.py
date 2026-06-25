@@ -175,6 +175,32 @@ def test_build_chunks_rechecks_token_cap_after_decoding_windows(tmp_path) -> Non
     assert all(chunk.body_token_count <= 4 for chunk in result.chunks)
 
 
+def test_build_chunks_sets_embedding_text_from_title_prefix_and_body(tmp_path) -> None:
+    source = tmp_path / "admitted.jsonl"
+    write_records(
+        source,
+        [
+            notice_record(
+                title="긴 공지 제목 초과",
+                body=long_body("본문", 6),
+            )
+        ],
+    )
+
+    result = build_chunks(
+        source,
+        chunking_config(title_prefix_max_tokens=3),
+        tokenizer=WhitespaceTokenizer(),
+    )
+
+    first_chunk = result.chunks[0]
+    assert first_chunk.title == "긴 공지 제목 초과"
+    assert first_chunk.title_prefix == "긴 공지 제목"
+    assert first_chunk.body_text == long_body("본문", 6)
+    assert first_chunk.embedding_text == f"{first_chunk.title_prefix}\n\n{first_chunk.body_text}"
+    assert first_chunk.classifier_text == first_chunk.embedding_text
+
+
 def test_write_chunk_artifacts_serializes_jsonl_parquet_histogram_and_manifest(
     tmp_path,
 ) -> None:
@@ -203,6 +229,8 @@ def test_write_chunk_artifacts_serializes_jsonl_parquet_histogram_and_manifest(
 
     assert jsonl_rows[0]["chunk_id"] == "notice-1::0000"
     assert parquet_rows[0]["chunk_id"] == "notice-1::0000"
+    assert jsonl_rows[0]["embedding_text"] == result.chunks[0].embedding_text
+    assert parquet_rows[0]["embedding_text"] == result.chunks[0].embedding_text
     assert histogram["body_token_count"]["12"] == 1
     assert manifest["artifact_files"] == [
         "chunks.jsonl",

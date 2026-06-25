@@ -99,7 +99,7 @@ def build_index_artifacts(
     else:
         if embedding_model is None:
             raise ValueError("embedding_model is required without embedding artifacts")
-        texts = [str(row["body_text"]) for row in chunk_rows]
+        texts = [str(row["embedding_text"]) for row in chunk_rows]
         vectors = embedding_model.encode(texts)
         if len(vectors) != len(chunk_rows):
             raise ValueError("embedding model returned a different row count")
@@ -179,7 +179,7 @@ def _read_chunks(path: Path) -> list[dict[str, object]]:
     rows = table.to_pylist()
     if not rows:
         raise ValueError(f"no chunks found in {path}")
-    required = {"chunk_id", "source_id", "category", "body_text"}
+    required = {"chunk_id", "source_id", "category", "body_text", "embedding_text"}
     for row in rows:
         missing = required.difference(row)
         if missing:
@@ -211,7 +211,7 @@ def _enrich_assignments(
                 "source_category": str(chunk["category"]),
                 "partition_category": str(assignment["category"]),
                 "category": str(assignment["category"]),
-                "probability": float(assignment["probability"]),
+                "probability": float(str(assignment["probability"])),
                 "assignment_reason": str(assignment["assignment_reason"]),
             }
         )
@@ -248,7 +248,7 @@ def _write_category_indexes(
                     chunk_by_id[str(row["chunk_id"])],
                     partition_category=category,
                 ),
-                "probability": float(row["probability"]),
+                "probability": float(str(row["probability"])),
                 "assignment_reason": str(row["assignment_reason"]),
             }
             for vector_index, row in enumerate(rows)
@@ -271,7 +271,7 @@ def _id_map_row(
     *,
     partition_category: str | None,
 ) -> dict[str, object]:
-    row = {
+    row: dict[str, object] = {
         "vector_index": vector_index,
         "chunk_id": str(chunk["chunk_id"]),
         "source_id": str(chunk["source_id"]),

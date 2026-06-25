@@ -134,6 +134,41 @@ def test_build_index_artifacts_reuses_precomputed_embeddings_without_encoding(
     assert writer.writes[0] == (output_path / "unified.faiss", 2, 6)
 
 
+def test_build_index_artifacts_encodes_embedding_text(tmp_path) -> None:
+    chunks_path = tmp_path / "chunks.parquet"
+    predictions_path = tmp_path / "predictions.parquet"
+    output_path = tmp_path / "indexes"
+    embedding_model = RecordingEmbeddingModel()
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                chunk_row(
+                    "c1",
+                    "본문만",
+                    embedding_text="제목 포함\n\n본문만",
+                ),
+            ]
+        ),
+        chunks_path,
+    )
+    pq.write_table(
+        pa.Table.from_pylist([prediction_row("c1", {"학사": 0.8})]),
+        predictions_path,
+    )
+
+    build_index_artifacts(
+        chunks_path=chunks_path,
+        predictions_path=predictions_path,
+        output_dir=output_path,
+        embedding_model=embedding_model,
+        index_writer=RecordingIndexWriter(),
+        ingest_threshold=0.6,
+        embedding_model_name="recording",
+    )
+
+    assert embedding_model.encoded_texts == ["제목 포함\n\n본문만"]
+
+
 def test_build_index_artifacts_rejects_incompatible_embedding_artifacts(
     tmp_path,
 ) -> None:
@@ -253,12 +288,27 @@ class ExplodingEmbeddingModel:
         raise AssertionError("precomputed embedding path must not encode texts")
 
 
-def chunk_row(chunk_id: str, body_text: str) -> dict[str, object]:
+class RecordingEmbeddingModel:
+    def __init__(self) -> None:
+        self.encoded_texts: list[str] = []
+
+    def encode(self, texts) -> list[list[float]]:
+        self.encoded_texts = list(texts)
+        return [[1.0, 0.0] for _ in self.encoded_texts]
+
+
+def chunk_row(
+    chunk_id: str,
+    body_text: str,
+    *,
+    embedding_text: str | None = None,
+) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
         "source_id": f"{chunk_id}-source",
         "category": "학사",
         "body_text": body_text,
+        "embedding_text": embedding_text or body_text,
     }
 
 
