@@ -129,6 +129,121 @@ def test_run_primary_cli_writes_four_variant_rows_with_precomputed_probabilities
     assert manifest["run_metadata"]["search_mode"] == "category-score-merge"
 
 
+@pytest.mark.parametrize(
+    ("query_type_option", "expected_query_id", "expected_query_type"),
+    [
+        ("core-single-category", "q-single", "single_category"),
+        ("multi-category", "q-multi", "multi_category"),
+        ("ambiguous", "q-ambiguous", "ambiguous"),
+    ],
+)
+def test_run_primary_cli_filters_by_query_type(
+    tmp_path,
+    monkeypatch,
+    query_type_option: str,
+    expected_query_id: str,
+    expected_query_type: str,
+) -> None:
+    queries_path = tmp_path / "queries.jsonl"
+    settings_path = tmp_path / "frozen.yaml"
+    indexes_path = tmp_path / "indexes"
+    output_path = tmp_path / f"run-{query_type_option}"
+    indexes_path.mkdir()
+    queries_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "query_id": "q-single",
+                        "query": "수강신청 변경 기간은?",
+                        "gold_chunks": ["c1"],
+                        "reference_answer": "3월입니다.",
+                        "gold_categories": ["학사"],
+                        "query_type": "single_category",
+                        "probabilities": {"학사": 0.9, "장학": 0.1},
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "query_id": "q-multi",
+                        "query": "수강신청과 장학 일정을 알려줘",
+                        "gold_chunks": ["c1", "c2"],
+                        "reference_answer": "답변입니다.",
+                        "gold_categories": ["학사", "장학"],
+                        "query_type": "multi_category",
+                        "probabilities": {"학사": 0.5, "장학": 0.5},
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "query_id": "q-ambiguous",
+                        "query": "공지 일정을 알려줘",
+                        "gold_chunks": ["c2"],
+                        "reference_answer": "답변입니다.",
+                        "gold_categories": ["장학"],
+                        "query_type": "ambiguous",
+                        "probabilities": {"학사": 0.1, "장학": 0.9},
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings_path.write_text(
+        "\n".join(
+            [
+                "candidate_k_per_partition: 2",
+                "report_top_k: 1",
+                "generation_context_top_n: 1",
+                "theta_route: 0.4",
+                "lambda_fixed: 0.5",
+                "lambda_by_category:",
+                "  학사: 0.8",
+                "  장학: 0.7",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "FaissSearchBackend", CliSearchBackend)
+
+    result = cli.main(
+        [
+            "run-primary",
+            "--queries",
+            str(queries_path),
+            "--settings",
+            str(settings_path),
+            "--indexes",
+            str(indexes_path),
+            "--output",
+            str(output_path),
+            "--embedding-backend",
+            "hash",
+            "--router",
+            "precomputed",
+            "--query-type",
+            query_type_option,
+        ]
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (output_path / "results.jsonl").read_text().splitlines()
+    ]
+    manifest = json.loads((output_path / "manifest.json").read_text())
+
+    assert result == 0
+    assert len(rows) == 4
+    assert {row["query_id"] for row in rows} == {expected_query_id}
+    assert {row["query_type"] for row in rows} == {expected_query_type}
+    assert manifest["query_count"] == 1
+    assert manifest["run_metadata"]["query_type_filter"] == query_type_option
+
+
 def test_run_primary_cli_records_v2_four_variant_manifest_lineage(
     tmp_path,
     monkeypatch,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 import orjson
 import typer
@@ -66,6 +66,20 @@ from .retrieval.variants import SEARCH_MODES
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
+
+RUN_PRIMARY_QUERY_TYPES: Final[dict[str, tuple[str, ...]]] = {
+    "core-single-category": (
+        "single_category",
+        "core_single_category",
+        "core-single-category",
+    ),
+    "multi-category": (
+        "multi_category",
+        "core_multi_category",
+        "multi-category",
+    ),
+    "ambiguous": ("ambiguous",),
+}
 
 
 @app.callback(invoke_without_command=True)
@@ -662,6 +676,10 @@ def run_primary_command(
         int,
         typer.Option("--unified-candidate-k"),
     ] = 100,
+    query_type: Annotated[
+        str | None,
+        typer.Option("--query-type"),
+    ] = None,
 ) -> None:
     """Run Phase 9 B0/B1/B2-score/P-score retrieval variants."""
 
@@ -669,10 +687,14 @@ def run_primary_command(
         router=router,
         search_mode=search_mode,
         unified_candidate_k=unified_candidate_k,
+        query_type=query_type,
     )
     config = load_indexing_config(config_path)
     model_name = embedding_model_name or config.embedding_model
-    query_rows = load_query_rows(queries_path)
+    query_rows = _filter_run_primary_query_rows(
+        load_query_rows(queries_path),
+        query_type=query_type,
+    )
     settings = load_primary_run_settings(
         settings_path,
         category_stats_path=category_stats_path,
@@ -724,6 +746,7 @@ def run_primary_command(
             "router": router,
             "search_mode": search_mode,
             "unified_candidate_k": unified_candidate_k,
+            "query_type_filter": query_type or "all",
         },
     )
     typer.echo(
@@ -987,6 +1010,7 @@ def _validate_run_primary_options(
     router: str,
     search_mode: str,
     unified_candidate_k: int,
+    query_type: str | None,
 ) -> None:
     if router not in {"final-classifier", "precomputed", "oracle"}:
         raise typer.BadParameter(
@@ -998,6 +1022,36 @@ def _validate_run_primary_options(
         )
     if unified_candidate_k <= 0:
         raise typer.BadParameter("--unified-candidate-k must be positive")
+    _run_primary_query_type_values(query_type)
+
+
+def _filter_run_primary_query_rows(
+    query_rows: Sequence[dict[str, object]],
+    *,
+    query_type: str | None,
+) -> list[dict[str, object]]:
+    values = _run_primary_query_type_values(query_type)
+    if not values:
+        return list(query_rows)
+    allowed_values = set(values)
+    filtered_rows = [
+        row for row in query_rows if str(row["query_type"]) in allowed_values
+    ]
+    if not filtered_rows:
+        raise typer.BadParameter(f"--query-type {query_type} matched no query rows")
+    return filtered_rows
+
+
+def _run_primary_query_type_values(query_type: str | None) -> tuple[str, ...]:
+    if query_type is None:
+        return ()
+    try:
+        return RUN_PRIMARY_QUERY_TYPES[query_type]
+    except KeyError as error:
+        raise typer.BadParameter(
+            "unknown query type; expected one of: "
+            f"{', '.join(RUN_PRIMARY_QUERY_TYPES)}"
+        ) from error
 
 
 def _retrieval_defaults_from_config(config_path: Path) -> dict[str, object]:
