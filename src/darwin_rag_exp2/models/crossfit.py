@@ -39,6 +39,7 @@ LAMBDA_C_NOT = "bert_confidence"
 FOLD_CLASSIFIER_PURPOSE = (
     "Phase 6 fold-local BERT classifier for out-of-fold probability artifacts"
 )
+FOLD_PARTIAL_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -135,17 +136,18 @@ def train_crossfit_classifier(
 
         calibration = calibrate_logits(run.calibration_logits, run.calibration_label_ids)
         probabilities = softmax(run.prediction_logits, calibration.temperature)
-        fold_predictions = _prediction_rows(
+        chunk_fold_predictions = _prediction_rows(
             validation_rows,
             run.labels,
             run.prediction_logits,
             probabilities,
         )
-        for prediction in fold_predictions:
+        for prediction in chunk_fold_predictions:
             prediction["fold_index"] = fold.fold_index
             prediction["probability_source"] = OOF_PROBABILITY_SOURCE
             prediction["temperature"] = _metric(calibration.temperature)
-        prediction_rows.extend(fold_predictions)
+        source_fold_predictions = _source_prediction_rows(chunk_fold_predictions)
+        prediction_rows.extend(source_fold_predictions)
 
         calibration_report = {
             "fold_index": fold.fold_index,
@@ -169,11 +171,11 @@ def train_crossfit_classifier(
             output_dir,
             fold_index=fold.fold_index,
             payload={
-                "schema_version": 1,
+                "schema_version": FOLD_PARTIAL_SCHEMA_VERSION,
                 "fingerprint": fold_fingerprint,
                 "calibration_report": calibration_report,
                 "model_reference": model_reference,
-                "predictions": fold_predictions,
+                "predictions": source_fold_predictions,
             },
         )
         _emit_progress(
@@ -190,7 +192,7 @@ def train_crossfit_classifier(
 
     prediction_rows = sorted(
         prediction_rows,
-        key=lambda row: (str(row["source_id"]), str(row["chunk_id"])),
+        key=lambda row: str(row["source_id"]),
     )
     category_stats = build_category_stats(
         prediction_rows,
@@ -221,7 +223,10 @@ def train_crossfit_classifier(
         "chunks_sha256": _file_sha256(chunks_path),
         "fold_count": len(folds),
         "source_count": len({row.source_id for row in rows}),
-        "prediction_chunk_count": len(prediction_rows),
+        "prediction_level": "source",
+        "source_probability_aggregation": "max",
+        "classified_chunk_count": len(rows),
+        "prediction_source_count": len(prediction_rows),
         "category_count": len(categories),
         "categories": list(categories),
         "epochs": config.epochs,
@@ -268,6 +273,66 @@ def _rows_for_fold(
     return training_rows, validation_rows
 
 
+def _source_prediction_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    rows_by_source: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        source_id = str(row["source_id"])
+        rows_by_source.setdefault(source_id, []).append(row)
+
+    predictions: list[dict[str, object]] = []
+    for source_id in sorted(rows_by_source):
+        source_rows = rows_by_source[source_id]
+        categories = {str(row["category"]) for row in source_rows}
+        fold_indexes = {int(row["fold_index"]) for row in source_rows}
+        probability_sources = {str(row["probability_source"]) for row in source_rows}
+        temperatures = {float(row["temperature"]) for row in source_rows}
+        if len(categories) != 1:
+            raise ValueError(f"source_id {source_id!r} has multiple categories")
+        if len(fold_indexes) != 1:
+            raise ValueError(f"source_id {source_id!r} spans multiple folds")
+        if len(probability_sources) != 1:
+            raise ValueError(f"source_id {source_id!r} has multiple probability sources")
+        if len(temperatures) != 1:
+            raise ValueError(f"source_id {source_id!r} has multiple temperatures")
+
+        probabilities: dict[str, float] = {}
+        for row in source_rows:
+            row_probabilities = row.get("probabilities")
+            if not isinstance(row_probabilities, Mapping):
+                raise ValueError(f"source_id {source_id!r} has no probabilities")
+            for category, probability in row_probabilities.items():
+                category_name = str(category)
+                probability_value = float(probability)
+                probabilities[category_name] = max(
+                    probability_value,
+                    probabilities.get(category_name, probability_value),
+                )
+        if not probabilities:
+            raise ValueError(f"source_id {source_id!r} has no probabilities")
+        predicted_category, confidence = max(
+            probabilities.items(),
+            key=lambda item: (item[1], item[0]),
+        )
+        predictions.append(
+            {
+                "source_id": source_id,
+                "category": next(iter(categories)),
+                "predicted_category": predicted_category,
+                "confidence": _metric(confidence),
+                "probabilities": {
+                    category: _metric(probability)
+                    for category, probability in sorted(probabilities.items())
+                },
+                "fold_index": next(iter(fold_indexes)),
+                "probability_source": next(iter(probability_sources)),
+                "temperature": _metric(next(iter(temperatures))),
+            }
+        )
+    return predictions
+
+
 def _fold_to_dict(fold: SourceFold) -> dict[str, object]:
     return {
         "fold_index": fold.fold_index,
@@ -301,7 +366,7 @@ def _load_fold_partial(
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
+    if payload.get("schema_version") != FOLD_PARTIAL_SCHEMA_VERSION:
         raise ValueError(f"incompatible partial fold schema at {path}")
     if payload.get("fingerprint") != expected_fingerprint:
         raise ValueError(f"incompatible partial fold artifact at {path}")
@@ -337,7 +402,6 @@ def _write_prediction_rows_parquet(
     for row in rows:
         parquet_rows.append(
             {
-                "chunk_id": str(row["chunk_id"]),
                 "source_id": str(row["source_id"]),
                 "category": str(row["category"]),
                 "predicted_category": str(row["predicted_category"]),
@@ -354,7 +418,6 @@ def _write_prediction_rows_parquet(
         )
     schema = pa.schema(
         [
-            pa.field("chunk_id", pa.string()),
             pa.field("source_id", pa.string()),
             pa.field("category", pa.string()),
             pa.field("predicted_category", pa.string()),

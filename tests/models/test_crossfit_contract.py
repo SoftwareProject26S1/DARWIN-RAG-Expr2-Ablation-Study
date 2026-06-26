@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from darwin_rag_exp2.cli import main
 import darwin_rag_exp2.models.crossfit as crossfit_module
@@ -24,13 +25,16 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
     chunks_path = tmp_path / "chunks.parquet"
     output_path = tmp_path / "classifier" / "crossfit"
     rows = [
-        chunk_row("a1", "학사", "수강 신청 변경 기간 학사 공지"),
+        chunk_row("a1", "학사", "수강 신청 변경 기간 학사 공지", chunk_index=0),
+        chunk_row("a1", "학사", "강의 시간표와 학사 일정 안내", chunk_index=1),
         chunk_row("a2", "학사", "강의 시간표와 학사 일정 안내"),
         chunk_row("a3", "학사", "졸업 요건 학점 이수 안내"),
-        chunk_row("s1", "장학", "국가 장학금 신청 서류 안내"),
+        chunk_row("s1", "장학", "국가 장학금 신청 서류 안내", chunk_index=0),
+        chunk_row("s1", "장학", "성적 장학 선발 결과 공지", chunk_index=1),
         chunk_row("s2", "장학", "성적 장학 선발 결과 공지"),
         chunk_row("s3", "장학", "교내 장학 추천서 제출 안내"),
     ]
+    source_ids = {row["source_id"] for row in rows}
     pq.write_table(pa.Table.from_pylist(rows), chunks_path)
     calls = []
 
@@ -131,10 +135,16 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
     assert manifest["model_type"] == "transformer_sequence_classification"
     assert manifest["base_model"] == "test-bert"
     assert manifest["probability_source"] == "out_of_fold_calibrated_probabilities"
+    assert manifest["prediction_level"] == "source"
+    assert manifest["source_probability_aggregation"] == "max"
+    assert manifest["classified_chunk_count"] == len(rows)
+    assert manifest["prediction_source_count"] == len(source_ids)
+    assert "prediction_chunk_count" not in manifest
     assert manifest["lambda_c_interpretation"] == "semantic_similarity_mixture_coefficient"
     assert manifest["lambda_c_not"] == "bert_confidence"
-    assert len(predictions) == len(rows)
-    assert {row["chunk_id"] for row in predictions} == {row["chunk_id"] for row in rows}
+    assert len(predictions) == len(source_ids)
+    assert {row["source_id"] for row in predictions} == source_ids
+    assert all("chunk_id" not in row for row in predictions)
 
     for prediction in predictions:
         fold = fold_by_index[prediction["fold_index"]]
@@ -164,9 +174,55 @@ def test_train_classifier_crossfit_writes_bert_out_of_fold_contract(
     )
     assert all(row["lambda_c_not"] == "bert_confidence" for row in stats)
     assert (output_path / "category_stats.parquet").exists()
-    assert (output_path / "predictions.parquet").exists()
+    parquet_table = pq.read_table(output_path / "predictions.parquet")
+    assert "chunk_id" not in parquet_table.schema.names
+    assert {row["source_id"] for row in parquet_table.to_pylist()} == source_ids
     assert (output_path / "calibration_by_fold.json").exists()
     assert (output_path / "model_references.json").exists()
+
+
+def test_source_prediction_rows_use_max_probability_per_source() -> None:
+    predictions = [
+        {
+            "chunk_id": "source-1::0000",
+            "source_id": "source-1",
+            "category": "학사",
+            "predicted_category": "학사",
+            "confidence": 0.6,
+            "probabilities": {"학사": 0.6, "장학": 0.4},
+            "logits": [1.0, 0.0],
+            "fold_index": 0,
+            "probability_source": "out_of_fold",
+            "temperature": 1.0,
+        },
+        {
+            "chunk_id": "source-1::0001",
+            "source_id": "source-1",
+            "category": "학사",
+            "predicted_category": "장학",
+            "confidence": 0.9,
+            "probabilities": {"학사": 0.7, "장학": 0.9},
+            "logits": [0.0, 1.0],
+            "fold_index": 0,
+            "probability_source": "out_of_fold",
+            "temperature": 1.0,
+        },
+    ]
+
+    rows = crossfit_module._source_prediction_rows(predictions)
+
+    assert rows == [
+        {
+            "source_id": "source-1",
+            "category": "학사",
+            "predicted_category": "장학",
+            "confidence": 0.9,
+            "probabilities": {"학사": 0.7, "장학": 0.9},
+            "fold_index": 0,
+            "probability_source": "out_of_fold",
+            "temperature": 1.0,
+        },
+    ]
 
 
 def test_train_classifier_crossfit_resume_reuses_completed_partial_fold(
@@ -221,7 +277,7 @@ def test_train_classifier_crossfit_resume_reuses_completed_partial_fold(
         output_path,
         fold_index=0,
         payload={
-            "schema_version": 1,
+            "schema_version": crossfit_module.FOLD_PARTIAL_SCHEMA_VERSION,
             "fingerprint": fingerprint,
             "calibration_report": {
                 "fold_index": 0,
@@ -311,7 +367,8 @@ def test_train_classifier_crossfit_resume_reuses_completed_partial_fold(
         json.loads(line)
         for line in (output_path / "out_of_fold_predictions.jsonl").read_text().splitlines()
     ]
-    assert len(predictions) == len(rows)
+    assert len(predictions) == len({row["source_id"] for row in rows})
+    assert all("chunk_id" not in row for row in predictions)
 
 
 def test_fold_partial_is_read_as_utf8(monkeypatch, tmp_path) -> None:
@@ -320,7 +377,7 @@ def test_fold_partial_is_read_as_utf8(monkeypatch, tmp_path) -> None:
     partial_path.parent.mkdir(parents=True)
     partial_path.write_text("{}", encoding="utf-8")
     payload = {
-        "schema_version": 1,
+        "schema_version": crossfit_module.FOLD_PARTIAL_SCHEMA_VERSION,
         "fingerprint": "fingerprint",
         "predictions": [{"category": "학사"}],
     }
@@ -342,11 +399,34 @@ def test_fold_partial_is_read_as_utf8(monkeypatch, tmp_path) -> None:
     assert encodings == ["utf-8"]
 
 
-def chunk_row(source_id: str, category: str, classifier_text: str) -> dict[str, object]:
+def test_old_fold_partial_schema_is_rejected(tmp_path) -> None:
+    output_path = tmp_path / "classifier" / "crossfit"
+    partial_path = output_path / "partial" / "fold_000.json"
+    partial_path.parent.mkdir(parents=True)
+    partial_path.write_text(
+        json.dumps({"schema_version": 1, "fingerprint": "fingerprint"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="incompatible partial fold schema"):
+        crossfit_module._load_fold_partial(
+            output_path,
+            fold_index=0,
+            expected_fingerprint="fingerprint",
+        )
+
+
+def chunk_row(
+    source_id: str,
+    category: str,
+    classifier_text: str,
+    *,
+    chunk_index: int = 0,
+) -> dict[str, object]:
     return {
-        "chunk_id": f"{source_id}::0000",
+        "chunk_id": f"{source_id}::{chunk_index:04d}",
         "source_id": source_id,
-        "chunk_index": 0,
+        "chunk_index": chunk_index,
         "category": category,
         "title": classifier_text.split()[0],
         "title_prefix": classifier_text.split()[0],
@@ -356,7 +436,7 @@ def chunk_row(source_id: str, category: str, classifier_text: str) -> dict[str, 
         "title_token_count": 1,
         "classifier_token_count": len(classifier_text.split()),
         "url": f"https://example.test/{source_id}",
-        "slug": source_id,
+        "slug": f"{source_id}-{chunk_index}",
         "date": "2026-05-01",
         "source": "test",
         "collected_at": "2026-05-01 00:00:00",
@@ -379,13 +459,11 @@ def prediction_dicts(rows, labels: tuple[str, ...], *, fold_index: int) -> list[
         }
         predictions.append(
             {
-                "chunk_id": row.chunk_id,
                 "source_id": row.source_id,
                 "category": row.category,
                 "predicted_category": row.category,
                 "confidence": 1.0,
                 "probabilities": probabilities,
-                "logits": [1.0 if label == row.category else 0.0 for label in labels],
                 "fold_index": fold_index,
                 "probability_source": "out_of_fold",
                 "temperature": 1.0,

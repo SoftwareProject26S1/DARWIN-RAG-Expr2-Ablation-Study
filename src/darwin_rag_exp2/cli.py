@@ -244,7 +244,7 @@ def train_classifier_command(
         )
         typer.echo(
             f"Wrote Phase 6 BERT crossfit classifier artifacts to {output_path} "
-            f"({result.manifest['prediction_chunk_count']} OOF predictions, "
+            f"({result.manifest['prediction_source_count']} source OOF predictions, "
             f"{result.manifest['fold_count']} folds)"
         )
         return
@@ -334,6 +334,7 @@ def build_indexes_command(
         typer.Option("--embeddings", exists=True, file_okay=False, readable=True),
     ] = None,
     ingest_threshold: Annotated[float, typer.Option("--ingest-threshold")] = 0.5,
+    partition_top_k: Annotated[int, typer.Option("--partition-top-k")] = 1,
     embedding_backend: Annotated[
         str,
         typer.Option("--embedding-backend"),
@@ -360,6 +361,7 @@ def build_indexes_command(
         embedding_model=embedding_model,
         index_writer=FaissIndexWriter(),
         ingest_threshold=ingest_threshold,
+        partition_top_k=partition_top_k,
         embedding_model_name=model_name,
         embedding_artifacts_dir=embeddings_path,
         normalize_embeddings=config.normalize_embeddings,

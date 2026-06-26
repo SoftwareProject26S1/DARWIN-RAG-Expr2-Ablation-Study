@@ -10,18 +10,21 @@ def build_partition_assignments(
     prediction_rows: Sequence[Mapping[str, object]],
     *,
     ingest_threshold: float,
+    partition_top_k: int = 1,
 ) -> list[dict[str, object]]:
-    """Assign each chunk to all threshold-passing categories or top-1 fallback."""
+    """Assign each chunk to threshold-passing categories with top-k fallback."""
 
     if ingest_threshold < 0.0 or ingest_threshold > 1.0:
         raise ValueError("ingest_threshold must be between 0 and 1")
+    if partition_top_k <= 0:
+        raise ValueError("partition_top_k must be positive")
 
     assignments: list[dict[str, object]] = []
     for row in prediction_rows:
         chunk_id = str(row.get("chunk_id", "")).strip()
         if not chunk_id:
             raise ValueError("prediction rows must contain chunk_id")
-        probabilities = _extract_probabilities(row)
+        probabilities = extract_probabilities(row)
         if not probabilities:
             raise ValueError(f"prediction row {chunk_id!r} has no probabilities")
 
@@ -36,6 +39,17 @@ def build_partition_assignments(
                 key=lambda item: (item[1], item[0]),
             )
             selected = [(category, probability, "top1_fallback")]
+        selected_categories = {category for category, _, _ in selected}
+        for category, probability in sorted(
+            probabilities.items(),
+            key=lambda item: (-item[1], item[0]),
+        ):
+            if len(selected) >= partition_top_k:
+                break
+            if category in selected_categories:
+                continue
+            selected.append((category, probability, "top_k_fallback"))
+            selected_categories.add(category)
 
         for category, probability, reason in sorted(
             selected,
@@ -52,7 +66,7 @@ def build_partition_assignments(
     return assignments
 
 
-def _extract_probabilities(row: Mapping[str, object]) -> dict[str, float]:
+def extract_probabilities(row: Mapping[str, object]) -> dict[str, float]:
     probabilities_json = row.get("probabilities_json")
     if isinstance(probabilities_json, str):
         decoded = json.loads(probabilities_json)
@@ -70,3 +84,6 @@ def _extract_probabilities(row: Mapping[str, object]) -> dict[str, float]:
             for category, probability in probabilities.items()
         }
     return {}
+
+
+_extract_probabilities = extract_probabilities

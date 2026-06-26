@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol, assert_never
 
 import orjson
 import pyarrow as pa
@@ -16,7 +16,9 @@ import yaml
 
 from .embedding_artifacts import load_embedding_artifacts
 from .embeddings import EmbeddingModel, l2_normalize
-from .partitions import build_partition_assignments
+from .partitions import build_partition_assignments, extract_probabilities
+
+PredictionLevel = Literal["chunk", "source"]
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ def build_index_artifacts(
     index_writer: IndexWriter,
     ingest_threshold: float,
     embedding_model_name: str,
+    partition_top_k: int = 1,
     embedding_artifacts_dir: Path | None = None,
     normalize_embeddings: bool = True,
     similarity_metric: str = "cosine_via_inner_product",
@@ -75,15 +78,37 @@ def build_index_artifacts(
     chunk_rows = _read_chunks(chunks_path)
     prediction_rows = _read_prediction_rows(predictions_path)
     chunk_by_id = {str(row["chunk_id"]): row for row in chunk_rows}
-    missing_prediction_chunks = sorted(
-        chunk_id
-        for chunk_id in chunk_by_id
-        if chunk_id not in {str(row.get("chunk_id")) for row in prediction_rows}
-    )
-    if missing_prediction_chunks:
-        raise ValueError(
-            f"missing predictions for {len(missing_prediction_chunks)} chunks"
-        )
+    source_ids = {str(row["source_id"]) for row in chunk_rows}
+    prediction_level = _prediction_artifact_level(prediction_rows)
+    match prediction_level:
+        case "chunk":
+            prediction_chunk_ids = _prediction_chunk_ids(prediction_rows)
+            missing_prediction_chunks = sorted(set(chunk_by_id).difference(prediction_chunk_ids))
+            if missing_prediction_chunks:
+                raise ValueError(
+                    f"missing predictions for {len(missing_prediction_chunks)} chunks"
+                )
+            unknown_prediction_chunks = sorted(prediction_chunk_ids.difference(chunk_by_id))
+            if unknown_prediction_chunks:
+                raise ValueError(
+                    f"unknown prediction chunk_id {unknown_prediction_chunks[0]!r}"
+                )
+            source_probability_aggregation = "max"
+        case "source":
+            prediction_source_ids = _prediction_source_ids(prediction_rows)
+            missing_prediction_sources = sorted(source_ids.difference(prediction_source_ids))
+            if missing_prediction_sources:
+                raise ValueError(
+                    f"missing predictions for {len(missing_prediction_sources)} sources"
+                )
+            unknown_prediction_sources = sorted(prediction_source_ids.difference(source_ids))
+            if unknown_prediction_sources:
+                raise ValueError(
+                    f"unknown prediction source_id {unknown_prediction_sources[0]!r}"
+                )
+            source_probability_aggregation = "provided"
+        case unreachable:
+            assert_never(unreachable)
 
     embedding_manifest: dict[str, object] | None = None
     if embedding_artifacts_dir is not None:
@@ -119,10 +144,24 @@ def build_index_artifacts(
     ]
     _write_parquet(output_dir / "unified_id_map.parquet", unified_id_rows)
 
-    assignments = build_partition_assignments(
-        prediction_rows,
-        ingest_threshold=ingest_threshold,
-    )
+    match prediction_level:
+        case "chunk":
+            assignments = _build_chunk_prediction_partition_assignments(
+                prediction_rows,
+                chunk_rows=chunk_rows,
+                chunk_by_id=chunk_by_id,
+                ingest_threshold=ingest_threshold,
+                partition_top_k=partition_top_k,
+            )
+        case "source":
+            assignments = _build_source_prediction_partition_assignments(
+                prediction_rows,
+                chunk_rows=chunk_rows,
+                ingest_threshold=ingest_threshold,
+                partition_top_k=partition_top_k,
+            )
+        case unreachable:
+            assert_never(unreachable)
     assignment_rows = _enrich_assignments(assignments, chunk_by_id)
     _write_parquet(output_dir / "partition_assignments.parquet", assignment_rows)
 
@@ -148,7 +187,12 @@ def build_index_artifacts(
         "similarity_metric": similarity_metric,
         "index_backend": getattr(index_writer, "index_backend", type(index_writer).__name__),
         "ingest_threshold": ingest_threshold,
+        "partition_top_k": partition_top_k,
+        "partition_assignment_level": "source",
+        "prediction_artifact_level": prediction_level,
+        "source_probability_aggregation": source_probability_aggregation,
         "chunk_count": len(chunk_rows),
+        "source_count": len(source_ids),
         "partition_assignment_count": len(assignment_rows),
         "category_indexes": category_indexes,
         "artifact_files": [
@@ -191,7 +235,143 @@ def _read_prediction_rows(path: Path) -> list[dict[str, object]]:
     rows = pq.read_table(path).to_pylist()
     if not rows:
         raise ValueError(f"no predictions found in {path}")
-    return sorted(rows, key=lambda row: str(row["chunk_id"]))
+    return sorted(
+        rows,
+        key=lambda row: (_row_text(row, "source_id"), _row_text(row, "chunk_id")),
+    )
+
+
+def _prediction_artifact_level(
+    prediction_rows: Sequence[Mapping[str, object]],
+) -> PredictionLevel:
+    has_chunk_id = [
+        bool(_row_text(row, "chunk_id"))
+        for row in prediction_rows
+    ]
+    has_source_id = [
+        bool(_row_text(row, "source_id"))
+        for row in prediction_rows
+    ]
+    if all(has_chunk_id):
+        return "chunk"
+    if not any(has_chunk_id) and all(has_source_id):
+        return "source"
+    raise ValueError("mixed prediction levels")
+
+
+def _prediction_chunk_ids(
+    prediction_rows: Sequence[Mapping[str, object]],
+) -> set[str]:
+    chunk_ids: set[str] = set()
+    for row in prediction_rows:
+        chunk_id = _row_text(row, "chunk_id")
+        if not chunk_id:
+            raise ValueError("prediction rows must contain chunk_id")
+        chunk_ids.add(chunk_id)
+    return chunk_ids
+
+
+def _prediction_source_ids(
+    prediction_rows: Sequence[Mapping[str, object]],
+) -> set[str]:
+    source_ids: set[str] = set()
+    for row in prediction_rows:
+        source_id = _row_text(row, "source_id")
+        if not source_id:
+            raise ValueError("prediction rows must contain source_id")
+        if source_id in source_ids:
+            raise ValueError(f"duplicate prediction source_id {source_id!r}")
+        source_ids.add(source_id)
+    return source_ids
+
+
+def _build_chunk_prediction_partition_assignments(
+    prediction_rows: Sequence[Mapping[str, object]],
+    *,
+    chunk_rows: Sequence[Mapping[str, object]],
+    chunk_by_id: Mapping[str, Mapping[str, object]],
+    ingest_threshold: float,
+    partition_top_k: int,
+) -> list[dict[str, object]]:
+    chunk_ids_by_source = _chunk_ids_by_source(chunk_rows)
+
+    probabilities_by_source: dict[str, dict[str, float]] = defaultdict(dict)
+    for row in prediction_rows:
+        chunk_id = str(row["chunk_id"])
+        source_id = str(chunk_by_id[chunk_id]["source_id"])
+        probabilities = extract_probabilities(row)
+        if not probabilities:
+            raise ValueError(f"prediction row {chunk_id!r} has no probabilities")
+        source_probabilities = probabilities_by_source[source_id]
+        for category, probability in probabilities.items():
+            source_probabilities[category] = max(
+                probability,
+                source_probabilities.get(category, probability),
+            )
+
+    source_assignments = build_partition_assignments(
+        [
+            {"chunk_id": source_id, "probabilities": probabilities_by_source[source_id]}
+            for source_id in sorted(chunk_ids_by_source)
+        ],
+        ingest_threshold=ingest_threshold,
+        partition_top_k=partition_top_k,
+    )
+    return _expand_source_assignments(source_assignments, chunk_ids_by_source)
+
+
+def _build_source_prediction_partition_assignments(
+    prediction_rows: Sequence[Mapping[str, object]],
+    *,
+    chunk_rows: Sequence[Mapping[str, object]],
+    ingest_threshold: float,
+    partition_top_k: int,
+) -> list[dict[str, object]]:
+    chunk_ids_by_source = _chunk_ids_by_source(chunk_rows)
+    source_assignments = build_partition_assignments(
+        [
+            {
+                "chunk_id": _row_text(row, "source_id"),
+                "probabilities": extract_probabilities(row),
+            }
+            for row in prediction_rows
+        ],
+        ingest_threshold=ingest_threshold,
+        partition_top_k=partition_top_k,
+    )
+    return _expand_source_assignments(source_assignments, chunk_ids_by_source)
+
+
+def _chunk_ids_by_source(
+    chunk_rows: Sequence[Mapping[str, object]],
+) -> dict[str, list[str]]:
+    chunk_ids_by_source: dict[str, list[str]] = defaultdict(list)
+    for chunk in chunk_rows:
+        chunk_ids_by_source[str(chunk["source_id"])].append(str(chunk["chunk_id"]))
+    return chunk_ids_by_source
+
+
+def _expand_source_assignments(
+    source_assignments: Sequence[Mapping[str, object]],
+    chunk_ids_by_source: Mapping[str, Sequence[str]],
+) -> list[dict[str, object]]:
+    assignments_by_source: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for assignment in source_assignments:
+        assignments_by_source[str(assignment["chunk_id"])].append(assignment)
+
+    assignments: list[dict[str, object]] = []
+    for source_id in sorted(chunk_ids_by_source):
+        for chunk_id in chunk_ids_by_source[source_id]:
+            for assignment in assignments_by_source[source_id]:
+                assignments.append({**assignment, "chunk_id": chunk_id})
+    return assignments
+
+
+def _row_text(row: Mapping[str, object], key: str) -> str:
+    value = row.get(key)
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _enrich_assignments(

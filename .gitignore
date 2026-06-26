@@ -21,6 +21,7 @@ data/annotations/
 *.tar.gz
 *.log
 journal-resources/
+analysis/
 
 # OS files
 .DS_Store
