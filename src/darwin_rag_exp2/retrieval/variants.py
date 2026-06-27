@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from .routing import soft_route_categories, top1_category
+from .routing import route_categories_for_query, top1_category
 from .score_merge import cosine_to_unit_interval, score_merge_candidates
 from .types import (
     PartitionHit,
@@ -20,10 +20,7 @@ from .types import (
 PRIMARY_VARIANTS = ("B0", "B1", "B2-score", "P-score")
 SEARCH_MODE_CATEGORY_SCORE_MERGE = "category-score-merge"
 SEARCH_MODE_UNIFIED_PRIOR_RERANK = "unified-prior-rerank"
-SEARCH_MODES = (
-    SEARCH_MODE_CATEGORY_SCORE_MERGE,
-    SEARCH_MODE_UNIFIED_PRIOR_RERANK,
-)
+SEARCH_MODES = (SEARCH_MODE_CATEGORY_SCORE_MERGE, SEARCH_MODE_UNIFIED_PRIOR_RERANK)
 
 
 def run_primary_variants(
@@ -115,14 +112,8 @@ def run_b2_score(
         )
         return _variant_result("B2-score", query.query_id, ranked, settings)
 
-    categories = soft_route_categories(
-        query.probabilities,
-        theta_route=settings.theta_route,
-    )
-    lambda_by_category = {
-        category: settings.lambda_fixed
-        for category in categories
-    }
+    categories = route_categories_for_query(query, settings).categories
+    lambda_by_category = {category: settings.lambda_fixed for category in categories}
     ranked = _run_score_merge(
         query,
         search_backend=search_backend,
@@ -154,14 +145,8 @@ def run_p_score(
         )
         return _variant_result("P-score", query.query_id, ranked, settings)
 
-    categories = soft_route_categories(
-        query.probabilities,
-        theta_route=settings.theta_route,
-    )
-    lambda_by_category = {
-        category: settings.lambda_by_category[category]
-        for category in categories
-    }
+    categories = route_categories_for_query(query, settings).categories
+    lambda_by_category = {category: settings.lambda_by_category[category] for category in categories}
     ranked = _run_score_merge(
         query,
         search_backend=search_backend,

@@ -86,6 +86,9 @@ class PrimaryRunSettings:
     theta_route: float
     lambda_fixed: float
     lambda_by_category: dict[str, float]
+    min_multi_route_width: int = 3
+    low_confidence_top1_threshold: float = 0.75
+    small_margin_threshold: float = 0.2
 
 
 class SearchBackend(Protocol):

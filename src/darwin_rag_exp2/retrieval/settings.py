@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from math import exp
 from pathlib import Path
-from typing import Any
 
 import orjson
 import yaml
@@ -69,6 +68,11 @@ def load_primary_run_settings(
             str(category): float(value)
             for category, value in lambda_by_category.items()
         },
+        min_multi_route_width=int(payload.get("min_multi_route_width", 3)),
+        low_confidence_top1_threshold=float(
+            payload.get("low_confidence_top1_threshold", 0.75)
+        ),
+        small_margin_threshold=float(payload.get("small_margin_threshold", 0.2)),
     )
 
 
@@ -81,6 +85,9 @@ def write_primary_run_settings(
     theta_route: float,
     lambda_fixed: float,
     lambda_by_category: Mapping[str, float],
+    min_multi_route_width: int = 3,
+    low_confidence_top1_threshold: float = 0.75,
+    small_margin_threshold: float = 0.2,
     tuning_metadata: Mapping[str, object] | None = None,
 ) -> None:
     """Write frozen Phase 9 settings as YAML."""
@@ -95,6 +102,9 @@ def write_primary_run_settings(
             str(category): float(value)
             for category, value in lambda_by_category.items()
         },
+        "min_multi_route_width": min_multi_route_width,
+        "low_confidence_top1_threshold": low_confidence_top1_threshold,
+        "small_margin_threshold": small_margin_threshold,
     }
     if tuning_metadata:
         payload["tuning_metadata"] = dict(tuning_metadata)

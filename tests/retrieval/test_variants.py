@@ -65,6 +65,15 @@ class FakeSearchBackend:
                     rank=2,
                 ),
             ],
+            "국제교류": [
+                SearchHit(
+                    chunk_id="c4",
+                    source_id="s4",
+                    source_category="국제교류",
+                    similarity=0.4,
+                    rank=1,
+                ),
+            ],
         }
         return hits_by_category.get(category, [])[:top_k]
 
@@ -120,7 +129,7 @@ def test_run_primary_variants_applies_variant_specific_routing_and_scoring() -> 
         generation_context_top_n=1,
         theta_route=0.6,
         lambda_fixed=0.5,
-        lambda_by_category={"학사": 0.1, "장학": 0.95},
+        lambda_by_category={"학사": 0.1, "장학": 0.95, "국제교류": 0.5},
     )
 
     results = run_primary_variants(
@@ -135,6 +144,50 @@ def test_run_primary_variants_applies_variant_specific_routing_and_scoring() -> 
     assert results["B2-score"].top10[0].chunk_id == "c1"
     assert results["P-score"].top10[0].chunk_id == "c2"
     assert results["P-score"].top5_contexts == results["P-score"].top10[:1]
+
+
+def test_category_score_merge_opens_same_top3_categories_for_b2_and_p_multi() -> None:
+    query = QueryFeatures(
+        query_id="dev_q0001",
+        query="수강신청과 장학 일정을 같이 알려줘",
+        embedding=[1.0, 0.0],
+        probabilities={"학사": 0.9, "장학": 0.1, "국제교류": 0.05, "채용": 0.04},
+        gold_chunks=("c1",),
+        gold_categories=("학사", "장학"),
+        query_type="multi_category",
+    )
+    settings = PrimaryRunSettings(
+        candidate_k_per_partition=2,
+        report_top_k=2,
+        generation_context_top_n=1,
+        theta_route=0.8,
+        lambda_fixed=0.5,
+        lambda_by_category={
+            "학사": 0.1,
+            "장학": 0.95,
+            "국제교류": 0.5,
+            "채용": 0.5,
+        },
+    )
+    backend = TrackingSearchBackend()
+
+    results = run_primary_variants(
+        query,
+        search_backend=backend,
+        settings=settings,
+    )
+
+    assert backend.category_calls == [
+        "학사",
+        "학사",
+        "장학",
+        "국제교류",
+        "학사",
+        "장학",
+        "국제교류",
+    ]
+    assert results["B2-score"].top10[0].lambda_value == 0.5
+    assert results["P-score"].top10[0].lambda_value != 0.5
 
 
 def test_unified_prior_rerank_uses_unified_candidates_for_b2_and_p() -> None:

@@ -152,6 +152,11 @@ def tune_adaptive_lambda_parameters(
                     theta_route=base_settings.theta_route,
                     lambda_fixed=base_settings.lambda_fixed,
                     lambda_by_category=lambda_by_category,
+                    min_multi_route_width=base_settings.min_multi_route_width,
+                    low_confidence_top1_threshold=(
+                        base_settings.low_confidence_top1_threshold
+                    ),
+                    small_margin_threshold=base_settings.small_margin_threshold,
                 )
                 metric_value = _average_p_metric(
                     queries,

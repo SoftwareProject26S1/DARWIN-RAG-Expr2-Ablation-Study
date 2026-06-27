@@ -16,7 +16,7 @@ from darwin_rag_exp2.evaluation.retrieval_metrics import (
     retrieval_metrics_at_k,
 )
 
-from .routing import soft_route_categories, top1_category
+from .routing import route_categories_for_query, top1_category
 from .types import (
     PrimaryRunSettings,
     QueryFeatures,
@@ -215,22 +215,14 @@ def _routing_payload(
             "route_width": 0,
         }
 
-    routed = soft_route_categories(
-        query.probabilities,
-        theta_route=settings.theta_route,
-    )
-    threshold_categories = [
-        category
-        for category, probability in query.probabilities.items()
-        if float(probability) >= settings.theta_route
-    ]
+    decision = route_categories_for_query(query, settings)
     return {
-        "mode": "soft_threshold" if threshold_categories else "top1_fallback",
+        "mode": decision.mode,
         "search_mode": search_mode,
         "candidate_depth": settings.candidate_k_per_partition,
-        "top1_category": top1,
-        "routed_categories": list(routed),
-        "route_width": len(routed),
+        "top1_category": decision.top1_category,
+        "routed_categories": list(decision.categories),
+        "route_width": len(decision.categories),
     }
 
 
@@ -251,6 +243,9 @@ def _settings_payload(settings: PrimaryRunSettings) -> dict[str, object]:
         "theta_route": settings.theta_route,
         "lambda_fixed": settings.lambda_fixed,
         "lambda_by_category": dict(settings.lambda_by_category),
+        "min_multi_route_width": settings.min_multi_route_width,
+        "low_confidence_top1_threshold": settings.low_confidence_top1_threshold,
+        "small_margin_threshold": settings.small_margin_threshold,
     }
 
 

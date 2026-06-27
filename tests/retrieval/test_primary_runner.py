@@ -87,6 +87,45 @@ def test_primary_runner_writes_variant_rows_metrics_and_manifest(tmp_path) -> No
     assert manifest["settings"]["theta_route"] == 0.6
 
 
+def test_primary_runner_records_min_top3_routing_for_multi_query() -> None:
+    settings = PrimaryRunSettings(
+        candidate_k_per_partition=2,
+        report_top_k=2,
+        generation_context_top_n=1,
+        theta_route=0.8,
+        lambda_fixed=0.5,
+        lambda_by_category={"학사": 0.8, "장학": 0.7, "국제교류": 0.6},
+    )
+    query = QueryFeatures(
+        query_id="test_q0001",
+        query="수강신청과 장학 일정을 같이 알려줘",
+        embedding=[1.0, 0.0],
+        probabilities={"학사": 0.9, "장학": 0.1, "국제교류": 0.05},
+        gold_chunks=("c1",),
+        gold_categories=("학사", "장학"),
+        query_type="multi_category",
+    )
+
+    rows = run_primary_queries(
+        [query],
+        search_backend=OneQuerySearchBackend(),
+        settings=settings,
+    )
+
+    routing_by_variant = {
+        str(row["variant"]): row["routing"]
+        for row in rows
+    }
+    assert routing_by_variant["B2-score"]["mode"] == "multi_min_top3"
+    assert routing_by_variant["B2-score"]["route_width"] == 3
+    assert routing_by_variant["B2-score"]["routed_categories"] == [
+        "학사",
+        "장학",
+        "국제교류",
+    ]
+    assert routing_by_variant["P-score"] == routing_by_variant["B2-score"]
+
+
 def test_primary_runner_includes_v2_metadata_and_graded_metrics_when_present() -> None:
     settings = PrimaryRunSettings(
         candidate_k_per_partition=2,

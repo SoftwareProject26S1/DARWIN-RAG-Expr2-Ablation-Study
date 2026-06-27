@@ -479,7 +479,9 @@ def test_run_primary_cli_oracle_router_uses_gold_categories(
         "장학": 0.5,
         "학사": 0.5,
     }
-    assert b2_row["routing"]["routed_categories"] == ["장학", "학사"]
+    assert b2_row["routing"]["mode"] == "multi_min_top3"
+    assert b2_row["routing"]["route_width"] == 3
+    assert b2_row["routing"]["routed_categories"] == ["장학", "학사", "국제교류"]
     assert manifest["run_metadata"]["router"] == "oracle"
     assert manifest["run_metadata"]["probability_source"] == "oracle_gold_categories"
 
