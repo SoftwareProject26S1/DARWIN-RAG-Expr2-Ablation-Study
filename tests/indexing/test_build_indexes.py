@@ -588,7 +588,7 @@ def test_build_embeddings_and_indexes_cli_reuses_precomputed_embeddings(
     pq.write_table(
         pa.Table.from_pylist(
             [
-                source_prediction_row("source-1", {"학사": 0.8, "장학": 0.9}),
+                source_prediction_row("source-1", {"학사": 0.8, "장학": 0.6}),
             ]
         ),
         predictions_path,
@@ -600,6 +600,9 @@ models:
 retrieval:
   normalize_embeddings: true
   similarity_metric: cosine_via_inner_product
+indexing:
+  ingest_threshold: 0.7
+  partition_top_k: 2
 """.lstrip(),
         encoding="utf-8",
     )
@@ -632,8 +635,6 @@ retrieval:
             str(config_path),
             "--embeddings",
             str(embeddings_path),
-            "--partition-top-k",
-            "2",
             "--output",
             str(output_path),
         ]
@@ -643,6 +644,7 @@ retrieval:
     assert (embeddings_path / "vectors.npy").exists()
     assert (output_path / "unified.faiss").exists()
     assert manifest["embedding_artifacts_path"] == str(embeddings_path)
+    assert manifest["ingest_threshold"] == 0.7
     assert manifest["partition_top_k"] == 2
     assert manifest["partition_assignment_level"] == "source"
     assert manifest["prediction_artifact_level"] == "source"
@@ -653,10 +655,10 @@ retrieval:
         (row["chunk_id"], row["category"], row["assignment_reason"])
         for row in assignments
     ] == [
-        ("c1", "장학", "threshold"),
         ("c1", "학사", "threshold"),
-        ("c2", "장학", "threshold"),
+        ("c1", "장학", "top_k_fallback"),
         ("c2", "학사", "threshold"),
+        ("c2", "장학", "top_k_fallback"),
     ]
 
 

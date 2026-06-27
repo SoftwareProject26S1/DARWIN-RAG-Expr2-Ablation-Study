@@ -28,6 +28,8 @@ class IndexingConfig:
     embedding_model: str
     normalize_embeddings: bool
     similarity_metric: str
+    ingest_threshold: float
+    partition_top_k: int
 
 
 @dataclass(frozen=True)
@@ -50,12 +52,15 @@ def load_indexing_config(config_path: Path) -> IndexingConfig:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     models = payload.get("models", {})
     retrieval = payload.get("retrieval", {})
+    indexing = payload.get("indexing", {})
     return IndexingConfig(
         embedding_model=str(models.get("embedder", "BAAI/bge-m3")),
         normalize_embeddings=bool(retrieval.get("normalize_embeddings", True)),
         similarity_metric=str(
             retrieval.get("similarity_metric", "cosine_via_inner_product")
         ),
+        ingest_threshold=float(indexing.get("ingest_threshold", 0.7)),
+        partition_top_k=int(indexing.get("partition_top_k", 3)),
     )
 
 

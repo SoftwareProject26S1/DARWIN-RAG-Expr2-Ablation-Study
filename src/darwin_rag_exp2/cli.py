@@ -333,8 +333,11 @@ def build_indexes_command(
         Path | None,
         typer.Option("--embeddings", exists=True, file_okay=False, readable=True),
     ] = None,
-    ingest_threshold: Annotated[float, typer.Option("--ingest-threshold")] = 0.5,
-    partition_top_k: Annotated[int, typer.Option("--partition-top-k")] = 1,
+    ingest_threshold: Annotated[
+        float | None,
+        typer.Option("--ingest-threshold"),
+    ] = None,
+    partition_top_k: Annotated[int | None, typer.Option("--partition-top-k")] = None,
     embedding_backend: Annotated[
         str,
         typer.Option("--embedding-backend"),
@@ -360,8 +363,12 @@ def build_indexes_command(
         output_dir=output_path,
         embedding_model=embedding_model,
         index_writer=FaissIndexWriter(),
-        ingest_threshold=ingest_threshold,
-        partition_top_k=partition_top_k,
+        ingest_threshold=(
+            ingest_threshold if ingest_threshold is not None else config.ingest_threshold
+        ),
+        partition_top_k=(
+            partition_top_k if partition_top_k is not None else config.partition_top_k
+        ),
         embedding_model_name=model_name,
         embedding_artifacts_dir=embeddings_path,
         normalize_embeddings=config.normalize_embeddings,
