@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from .routing import route_categories_for_query, top1_category
 from .score_merge import cosine_to_unit_interval, score_merge_candidates
@@ -200,12 +202,14 @@ def _run_score_merge(
     lambda_by_category: Mapping[str, float],
 ) -> tuple[RankedChunk, ...]:
     candidates: list[PartitionHit] = []
-    for category in categories:
-        hits = search_backend.search_category(
-            category,
-            query.embedding,
-            top_k=settings.candidate_k_per_partition,
-        )
+    search_partition = partial(
+        search_backend.search_category,
+        query_embedding=query.embedding,
+        top_k=settings.candidate_k_per_partition,
+    )
+    with ThreadPoolExecutor(max_workers=len(categories)) as executor:
+        hits_by_category = list(executor.map(search_partition, categories))
+    for category, hits in zip(categories, hits_by_category, strict=True):
         candidates.extend(_partition_hits(hits, partition_category=category))
     return score_merge_candidates(
         candidates,
@@ -279,6 +283,4 @@ def _metric(value: float) -> float:
 
 def _validate_search_mode(search_mode: str) -> None:
     if search_mode not in SEARCH_MODES:
-        raise ValueError(
-            f"unknown search mode {search_mode!r}; expected one of {SEARCH_MODES}"
-        )
+        raise ValueError(f"unknown search mode {search_mode!r}; expected one of {SEARCH_MODES}")

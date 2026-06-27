@@ -1,13 +1,17 @@
+import time
+from typing import override
+
 from darwin_rag_exp2.retrieval.types import (
     PrimaryRunSettings,
     QueryFeatures,
     SearchHit,
 )
-from darwin_rag_exp2.retrieval.variants import run_primary_variants
+from darwin_rag_exp2.retrieval.variants import run_b2_score, run_primary_variants
 
 
 class FakeSearchBackend:
     def search_unified(self, query_embedding: list[float], *, top_k: int) -> list[SearchHit]:
+        _ = query_embedding
         return [
             SearchHit(
                 chunk_id="c3",
@@ -32,6 +36,7 @@ class FakeSearchBackend:
         *,
         top_k: int,
     ) -> list[SearchHit]:
+        _ = query_embedding
         hits_by_category = {
             "학사": [
                 SearchHit(
@@ -83,7 +88,9 @@ class TrackingSearchBackend(FakeSearchBackend):
         self.unified_top_k: list[int] = []
         self.category_calls: list[str] = []
 
+    @override
     def search_unified(self, query_embedding: list[float], *, top_k: int) -> list[SearchHit]:
+        _ = query_embedding
         self.unified_top_k.append(top_k)
         return [
             SearchHit(
@@ -102,6 +109,7 @@ class TrackingSearchBackend(FakeSearchBackend):
             ),
         ][:top_k]
 
+    @override
     def search_category(
         self,
         category: str,
@@ -110,6 +118,19 @@ class TrackingSearchBackend(FakeSearchBackend):
         top_k: int,
     ) -> list[SearchHit]:
         self.category_calls.append(category)
+        return super().search_category(category, query_embedding, top_k=top_k)
+
+
+class SlowSearchBackend(FakeSearchBackend):
+    @override
+    def search_category(
+        self,
+        category: str,
+        query_embedding: list[float],
+        *,
+        top_k: int,
+    ) -> list[SearchHit]:
+        time.sleep(0.05)
         return super().search_category(category, query_embedding, top_k=top_k)
 
 
@@ -177,17 +198,41 @@ def test_category_score_merge_opens_same_top3_categories_for_b2_and_p_multi() ->
         settings=settings,
     )
 
-    assert backend.category_calls == [
-        "학사",
-        "학사",
-        "장학",
-        "국제교류",
-        "학사",
-        "장학",
-        "국제교류",
-    ]
+    assert backend.category_calls[0] == "학사"
+    assert sorted(backend.category_calls[1:4]) == ["국제교류", "장학", "학사"]
+    assert sorted(backend.category_calls[4:]) == ["국제교류", "장학", "학사"]
     assert results["B2-score"].top10[0].lambda_value == 0.5
     assert results["P-score"].top10[0].lambda_value != 0.5
+
+
+def test_b2_searches_routed_category_partitions_concurrently() -> None:
+    query = QueryFeatures(
+        query_id="dev_q0001",
+        query="수강신청과 장학 일정을 같이 알려줘",
+        embedding=[1.0, 0.0],
+        probabilities={"학사": 0.9, "장학": 0.1, "국제교류": 0.05},
+        gold_chunks=("c1",),
+        gold_categories=("학사", "장학"),
+        query_type="multi_category",
+    )
+    settings = PrimaryRunSettings(
+        candidate_k_per_partition=2,
+        report_top_k=2,
+        generation_context_top_n=1,
+        theta_route=0.8,
+        lambda_fixed=0.5,
+        lambda_by_category={"학사": 0.1, "장학": 0.95, "국제교류": 0.5},
+    )
+
+    started_at = time.perf_counter()
+    result = run_b2_score(
+        query,
+        search_backend=SlowSearchBackend(),
+        settings=settings,
+    )
+
+    assert time.perf_counter() - started_at < 0.12
+    assert [item.chunk_id for item in result.top10] == ["c1", "c2"]
 
 
 def test_unified_prior_rerank_uses_unified_candidates_for_b2_and_p() -> None:
