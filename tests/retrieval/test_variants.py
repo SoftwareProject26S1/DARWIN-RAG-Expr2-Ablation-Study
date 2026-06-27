@@ -1,6 +1,8 @@
 import time
 from typing import override
 
+import pytest
+
 from darwin_rag_exp2.retrieval.types import (
     PrimaryRunSettings,
     QueryFeatures,
@@ -12,21 +14,10 @@ from darwin_rag_exp2.retrieval.variants import run_b2_score, run_primary_variant
 class FakeSearchBackend:
     def search_unified(self, query_embedding: list[float], *, top_k: int) -> list[SearchHit]:
         _ = query_embedding
+        hit = SearchHit
         return [
-            SearchHit(
-                chunk_id="c3",
-                source_id="s3",
-                source_category="비교과·행사",
-                similarity=0.9,
-                rank=1,
-            ),
-            SearchHit(
-                chunk_id="c1",
-                source_id="s1",
-                source_category="학사",
-                similarity=0.7,
-                rank=2,
-            ),
+            hit(chunk_id="c3", source_id="s3", source_category="비교과·행사", similarity=0.9, rank=1),
+            hit(chunk_id="c1", source_id="s1", source_category="학사", similarity=0.7, rank=2),
         ][:top_k]
 
     def search_category(
@@ -37,47 +28,18 @@ class FakeSearchBackend:
         top_k: int,
     ) -> list[SearchHit]:
         _ = query_embedding
+        hit = SearchHit
         hits_by_category = {
             "학사": [
-                SearchHit(
-                    chunk_id="c1",
-                    source_id="s1",
-                    source_category="학사",
-                    similarity=0.8,
-                    rank=1,
-                ),
-                SearchHit(
-                    chunk_id="c2",
-                    source_id="s2",
-                    source_category="장학",
-                    similarity=0.5,
-                    rank=2,
-                ),
+                hit(chunk_id="c1", source_id="s1", source_category="학사", similarity=0.8, rank=1),
+                hit(chunk_id="c2", source_id="s2", source_category="장학", similarity=0.5, rank=2),
             ],
             "장학": [
-                SearchHit(
-                    chunk_id="c2",
-                    source_id="s2",
-                    source_category="장학",
-                    similarity=0.9,
-                    rank=1,
-                ),
-                SearchHit(
-                    chunk_id="c1",
-                    source_id="s1",
-                    source_category="학사",
-                    similarity=0.6,
-                    rank=2,
-                ),
+                hit(chunk_id="c2", source_id="s2", source_category="장학", similarity=0.9, rank=1),
+                hit(chunk_id="c1", source_id="s1", source_category="학사", similarity=0.6, rank=2),
             ],
             "국제교류": [
-                SearchHit(
-                    chunk_id="c4",
-                    source_id="s4",
-                    source_category="국제교류",
-                    similarity=0.4,
-                    rank=1,
-                ),
+                hit(chunk_id="c4", source_id="s4", source_category="국제교류", similarity=0.4, rank=1),
             ],
         }
         return hits_by_category.get(category, [])[:top_k]
@@ -92,21 +54,10 @@ class TrackingSearchBackend(FakeSearchBackend):
     def search_unified(self, query_embedding: list[float], *, top_k: int) -> list[SearchHit]:
         _ = query_embedding
         self.unified_top_k.append(top_k)
+        hit = SearchHit
         return [
-            SearchHit(
-                chunk_id="c1",
-                source_id="s1",
-                source_category="학사",
-                similarity=0.9,
-                rank=1,
-            ),
-            SearchHit(
-                chunk_id="c2",
-                source_id="s2",
-                source_category="장학",
-                similarity=0.85,
-                rank=2,
-            ),
+            hit(chunk_id="c1", source_id="s1", source_category="학사", similarity=0.9, rank=1),
+            hit(chunk_id="c2", source_id="s2", source_category="장학", similarity=0.85, rank=2),
         ][:top_k]
 
     @override
@@ -232,6 +183,45 @@ def test_b2_searches_routed_category_partitions_concurrently() -> None:
     )
 
     assert time.perf_counter() - started_at < 0.12
+    assert [item.chunk_id for item in result.top10] == ["c1", "c2"]
+
+
+def test_b2_searches_single_routed_category_without_thread_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingThreadPoolExecutor:
+        def __init__(self, *, max_workers: int) -> None:
+            _ = max_workers
+            raise AssertionError("single-category route should not create a thread pool")
+
+    monkeypatch.setattr(
+        "darwin_rag_exp2.retrieval.variants.ThreadPoolExecutor",
+        FailingThreadPoolExecutor,
+    )
+    query = QueryFeatures(
+        query_id="dev_q0001",
+        query="수강신청 일정을 알려줘",
+        embedding=[1.0, 0.0],
+        probabilities={"학사": 0.9, "장학": 0.05, "국제교류": 0.04},
+        gold_chunks=("c1",),
+        gold_categories=("학사",),
+        query_type="single_category",
+    )
+    settings = PrimaryRunSettings(
+        candidate_k_per_partition=2,
+        report_top_k=2,
+        generation_context_top_n=1,
+        theta_route=0.8,
+        lambda_fixed=0.5,
+        lambda_by_category={"학사": 0.1, "장학": 0.95, "국제교류": 0.5},
+    )
+
+    result = run_b2_score(
+        query,
+        search_backend=FakeSearchBackend(),
+        settings=settings,
+    )
+
     assert [item.chunk_id for item in result.top10] == ["c1", "c2"]
 
 

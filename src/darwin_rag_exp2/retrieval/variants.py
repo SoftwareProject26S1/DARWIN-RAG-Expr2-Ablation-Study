@@ -64,10 +64,7 @@ def run_b0(
 ) -> VariantResult:
     """Run the unified-index similarity baseline."""
 
-    hits = search_backend.search_unified(
-        query.embedding,
-        top_k=settings.report_top_k,
-    )
+    hits = search_backend.search_unified(query.embedding, top_k=settings.report_top_k)
     ranked = _rank_similarity_hits(hits, partition_category=None)
     return _variant_result("B0", query.query_id, ranked, settings)
 
@@ -81,11 +78,7 @@ def run_b1(
     """Run the hard-routing top-1 category baseline."""
 
     category = top1_category(query.probabilities)
-    hits = search_backend.search_category(
-        category,
-        query.embedding,
-        top_k=settings.report_top_k,
-    )
+    hits = search_backend.search_category(category, query.embedding, top_k=settings.report_top_k)
     ranked = _rank_similarity_hits(hits, partition_category=category)
     return _variant_result("B1", query.query_id, ranked, settings)
 
@@ -169,10 +162,7 @@ def _run_unified_prior_rerank(
 ) -> tuple[RankedChunk, ...]:
     if unified_candidate_k <= 0:
         raise ValueError("unified_candidate_k must be positive")
-    hits = search_backend.search_unified(
-        query.embedding,
-        top_k=unified_candidate_k,
-    )
+    hits = search_backend.search_unified(query.embedding, top_k=unified_candidate_k)
     candidates = [
         PartitionHit(
             chunk_id=hit.chunk_id,
@@ -207,8 +197,11 @@ def _run_score_merge(
         query_embedding=query.embedding,
         top_k=settings.candidate_k_per_partition,
     )
-    with ThreadPoolExecutor(max_workers=len(categories)) as executor:
-        hits_by_category = list(executor.map(search_partition, categories))
+    if len(categories) == 1:
+        hits_by_category = [search_partition(categories[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=len(categories)) as executor:
+            hits_by_category = list(executor.map(search_partition, categories))
     for category, hits in zip(categories, hits_by_category, strict=True):
         candidates.extend(_partition_hits(hits, partition_category=category))
     return score_merge_candidates(
