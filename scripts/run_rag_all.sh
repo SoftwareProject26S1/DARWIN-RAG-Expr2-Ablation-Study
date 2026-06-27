@@ -16,14 +16,15 @@ CLASSIFIER_DEVICE="${CLASSIFIER_DEVICE:-auto}"
 UNIFIED_CANDIDATE_K="${UNIFIED_CANDIDATE_K:-100}"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-RUN_ROOT="${RUN_ROOT:-runs/full-primary-suite-${STAMP}}"
-ANALYSIS_ROOT="${ANALYSIS_ROOT:-analysis/full-primary-suite-${STAMP}}"
+SUITE_NAME="${PREFIX:-full-primary-suite-${STAMP}}"
+RUN_ROOT="${RUN_ROOT:-runs/${SUITE_NAME}}"
+ANALYSIS_ROOT="${ANALYSIS_ROOT:-analysis/${SUITE_NAME}}"
 
 run_and_analyze() {
   local name="$1"
   shift
 
-  local run_name="${PREFIX}${name}"
+  local run_name="${name}"
   local run_dir="${RUN_ROOT}/${run_name}"
   local analysis_dir="${ANALYSIS_ROOT}/${run_name}"
 
