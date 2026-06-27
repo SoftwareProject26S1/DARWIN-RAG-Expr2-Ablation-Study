@@ -77,9 +77,24 @@ def test_primary_runner_writes_variant_rows_metrics_and_manifest(tmp_path) -> No
         for row in result_lines
     )
     assert result_lines[0]["metrics"]["hit@2"] == 1.0
+    assert "classifier_confidences" not in result_lines[0]
     assert "schema_version" not in result_lines[0]
     assert result_lines[0]["top10"][0]["chunk_id"] == "c1"
     assert result_lines[0]["top5_contexts"][0]["chunk_id"] == "c1"
+    assert result_lines[2]["classifier_confidences"] == [
+        {
+            "category": "학사",
+            "confidence": 0.9,
+            "rank": 1,
+            "routed": True,
+        },
+        {
+            "category": "장학",
+            "confidence": 0.7,
+            "rank": 2,
+            "routed": True,
+        },
+    ]
     assert result_lines[2]["routing"]["search_mode"] == "category-score-merge"
     assert result_lines[2]["routing"]["candidate_depth"] == 2
     assert manifest["query_count"] == 1

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
 import orjson
 
@@ -117,8 +115,7 @@ def validate_primary_result_rows(result_rows: Sequence[Mapping[str, object]]) ->
             or value < 0
         ):
             raise ValueError(
-                "primary result row "
-                f"{index} has invalid retrieval_time_ms: {value!r}"
+                f"primary result row {index} has invalid retrieval_time_ms: {value!r}"
             )
 
 
@@ -144,7 +141,14 @@ def _result_row(
                 k=settings.report_top_k,
             )
         )
-    row = {
+    routing = _routing_payload(
+        query,
+        variant_result.variant,
+        settings,
+        search_mode=search_mode,
+        unified_candidate_k=unified_candidate_k,
+    )
+    row: dict[str, object] = {
         "query_id": query.query_id,
         "query": query.query,
         "variant": variant_result.variant,
@@ -153,17 +157,21 @@ def _result_row(
         "gold_categories": list(query.gold_categories),
         "query_probabilities": dict(query.probabilities),
         "retrieval_time_ms": retrieval_time_ms,
-        "routing": _routing_payload(
-            query,
-            variant_result.variant,
-            settings,
-            search_mode=search_mode,
-            unified_candidate_k=unified_candidate_k,
-        ),
+        "routing": routing,
         "metrics": metric_values,
         "top10": [_ranked_payload(row) for row in variant_result.top10],
         "top5_contexts": list(map(_ranked_payload, variant_result.top5_contexts)),
     }
+    if variant_result.variant != "B0":
+        row["classifier_confidences"] = _classifier_confidence_payload(
+            query.probabilities,
+            _confidence_routed_categories(
+                query,
+                variant_result.variant,
+                settings,
+                search_mode=search_mode,
+            ),
+        )
     if query.graded_relevance:
         row["graded_relevance"] = dict(query.graded_relevance)
     if query.neighbor_chunk_ids:
@@ -227,12 +235,57 @@ def _routing_payload(
 
 
 def _ranked_payload(row: RankedChunk) -> dict[str, object]:
-    payload = asdict(row)
-    return {
-        key: value
-        for key, value in payload.items()
-        if value is not None
+    payload: dict[str, object] = {
+        "chunk_id": row.chunk_id,
+        "source_id": row.source_id,
+        "source_category": row.source_category,
+        "partition_category": row.partition_category,
+        "rank": row.rank,
+        "score": row.score,
+        "similarity": row.similarity,
+        "similarity_norm": row.similarity_norm,
+        "query_category_probability": row.query_category_probability,
+        "lambda_value": row.lambda_value,
+        "scoring_method": row.scoring_method,
     }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _classifier_confidence_payload(
+    probabilities: Mapping[str, float],
+    routed_categories: Sequence[str],
+) -> list[dict[str, object]]:
+    routed = set(routed_categories)
+    ranked = sorted(probabilities.items(), key=lambda item: (-item[1], item[0]))
+    return [
+        {
+            "category": category,
+            "confidence": _confidence_metric(confidence),
+            "rank": index,
+            "routed": category in routed,
+        }
+        for index, (category, confidence) in enumerate(ranked, start=1)
+    ]
+
+
+def _confidence_routed_categories(
+    query: QueryFeatures,
+    variant: str,
+    settings: PrimaryRunSettings,
+    *,
+    search_mode: str,
+) -> list[str]:
+    if variant == "B0":
+        return []
+    if variant == "B1":
+        return [top1_category(query.probabilities)]
+    if search_mode == SEARCH_MODE_UNIFIED_PRIOR_RERANK:
+        return []
+    return list(route_categories_for_query(query, settings).categories)
+
+
+def _confidence_metric(value: float) -> float:
+    return round(float(value), 12)
 
 
 def _settings_payload(settings: PrimaryRunSettings) -> dict[str, object]:
@@ -258,8 +311,8 @@ def _validate_search_options(search_mode: str, unified_candidate_k: int) -> None
         raise ValueError("unified_candidate_k must be positive")
 
 
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.write_bytes(
+def _write_json(path: Path, payload: Mapping[str, object]) -> None:
+    _ = path.write_bytes(
         orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
         + b"\n"
     )
@@ -268,5 +321,5 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     with path.open("wb") as output:
         for row in rows:
-            output.write(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
-            output.write(b"\n")
+            _ = output.write(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
+            _ = output.write(b"\n")

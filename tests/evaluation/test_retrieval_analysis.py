@@ -83,6 +83,27 @@ def test_analyze_primary_results_reports_routing_and_strict_gold_failures() -> N
     assert b2_failure["top10"][0]["chunk_id"] == "c4"
 
 
+def test_analyze_primary_results_reports_routing_confidence_details() -> None:
+    rows = _sample_result_rows()
+
+    analysis = analyze_primary_results(rows, metric_key="ndcg@10", top_failures=5)
+
+    details = {
+        (row["query_id"], row["variant"]): row
+        for row in analysis["routing_confidence_details"]
+    }
+    q2_b2 = details[("q2", "B2-score")]
+    assert ("q2", "B0") not in details
+    assert q2_b2["top1_category"] == "장학"
+    assert q2_b2["top1_confidence"] == 0.55
+    assert q2_b2["top2_confidence"] == 0.45
+    assert q2_b2["top1_margin"] == 0.1
+    assert q2_b2["routed_categories"] == "장학,학사"
+    assert q2_b2["routed_confidences"] == "장학:0.55,학사:0.45"
+    assert q2_b2["gold_in_routes"] is True
+    assert q2_b2["classifier_confidence_distribution"] == "장학:0.55,학사:0.45"
+
+
 def test_analyze_primary_results_reports_retrieval_time_summaries() -> None:
     rows = _sample_result_rows()
 
@@ -158,9 +179,11 @@ def test_write_primary_analysis_includes_timing_artifacts_in_manifest(tmp_path) 
 
     assert (tmp_path / "retrieval_time_by_variant.csv").exists()
     assert (tmp_path / "retrieval_time_by_query_type.csv").exists()
+    assert (tmp_path / "routing_confidence_details.csv").exists()
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert "retrieval_time_by_variant.csv" in manifest["artifact_files"]
     assert "retrieval_time_by_query_type.csv" in manifest["artifact_files"]
+    assert "routing_confidence_details.csv" in manifest["artifact_files"]
 
 
 def test_analyze_primary_results_supports_legacy_rows_without_routing() -> None:
@@ -288,6 +311,12 @@ def _query_rows(
                 "gold_chunks": gold_chunks,
                 "gold_categories": gold_categories,
                 "query_probabilities": {"학사": 0.45, "장학": 0.55},
+                "classifier_confidences": _classifier_confidences(
+                    {"학사": 0.45, "장학": 0.55},
+                    routing_by_variant[variant]["routed_categories"],
+                )
+                if variant != "B0"
+                else [],
                 "routing": routing_by_variant[variant],
                 "metrics": {
                     "hit@10": 1.0 if ndcg > 0.0 else 0.0,
@@ -339,3 +368,20 @@ def _routing(
         "routed_categories": routed_categories,
         "route_width": route_width,
     }
+
+
+def _classifier_confidences(
+    probabilities: dict[str, float],
+    routed_categories: list[str],
+) -> list[dict[str, object]]:
+    routed = set(routed_categories)
+    ranked = sorted(probabilities.items(), key=lambda item: (-item[1], item[0]))
+    return [
+        {
+            "category": category,
+            "confidence": confidence,
+            "rank": index,
+            "routed": category in routed,
+        }
+        for index, (category, confidence) in enumerate(ranked, start=1)
+    ]

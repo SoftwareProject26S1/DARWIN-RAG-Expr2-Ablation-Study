@@ -707,6 +707,7 @@ def test_analyze_primary_cli_writes_analysis_artifacts(tmp_path) -> None:
         "paired_comparison.json",
         "paired_deltas.csv",
         "routing_diagnostics.csv",
+        "routing_confidence_details.csv",
         "variant_equivalence.csv",
         "failure_cases.jsonl",
         "failure_cases.md",

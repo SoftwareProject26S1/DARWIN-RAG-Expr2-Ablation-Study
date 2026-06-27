@@ -108,6 +108,7 @@ def analyze_primary_results(
         ),
         "paired_deltas": paired_deltas,
         "routing_diagnostics": _routing_diagnostics(rows, variants),
+        "routing_confidence_details": _routing_confidence_details(rows),
         "variant_equivalence": _variant_equivalence(grouped),
         "failure_cases": _failure_cases(
             grouped,
@@ -141,6 +142,7 @@ def write_primary_analysis(
         "paired_comparison.json",
         "paired_deltas.csv",
         "routing_diagnostics.csv",
+        "routing_confidence_details.csv",
         "variant_equivalence.csv",
         "failure_cases.jsonl",
         "failure_cases.md",
@@ -168,6 +170,10 @@ def write_primary_analysis(
     _write_json(output_dir / "paired_comparison.json", analysis["paired_comparison"])
     _write_csv(output_dir / "paired_deltas.csv", analysis["paired_deltas"])
     _write_csv(output_dir / "routing_diagnostics.csv", analysis["routing_diagnostics"])
+    _write_csv(
+        output_dir / "routing_confidence_details.csv",
+        analysis["routing_confidence_details"],
+    )
     _write_csv(output_dir / "variant_equivalence.csv", analysis["variant_equivalence"])
     _write_jsonl(output_dir / "failure_cases.jsonl", analysis["failure_cases"])
     _write_failure_markdown(output_dir / "failure_cases.md", analysis["failure_cases"])
@@ -467,6 +473,52 @@ def _routing_diagnostics(
     return output
 
 
+def _routing_confidence_details(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for row in rows:
+        variant = str(row["variant"])
+        if variant == "B0":
+            continue
+        routing = _routing_payload(row)
+        confidences = _classifier_confidences(row)
+        routed_categories = _string_list(routing.get("routed_categories"))
+        gold_categories = set(_string_list(row.get("gold_categories")))
+        confidence_by_category = {
+            category: confidence for category, confidence in confidences
+        }
+        routed_confidences = [
+            f"{category}:{_metric(confidence_by_category.get(category, 0.0))}"
+            for category in routed_categories
+        ]
+        top1 = confidences[0] if confidences else ("", 0.0)
+        top2_confidence = confidences[1][1] if len(confidences) > 1 else 0.0
+        route_width = _int_field(routing.get("route_width"))
+        detail: dict[str, object] = {
+            "query_id": str(row["query_id"]),
+            "query": str(row.get("query", "")),
+            "query_type": str(row.get("query_type", "")),
+            "variant": variant,
+            "routing_mode": str(routing.get("mode", "")),
+            "top1_category": top1[0],
+            "top1_confidence": _metric(top1[1]),
+            "top2_confidence": _metric(top2_confidence),
+            "top1_margin": _metric(top1[1] - top2_confidence),
+            "route_width": route_width,
+            "routed_categories": ",".join(routed_categories),
+            "routed_confidences": ",".join(routed_confidences),
+            "gold_categories": ",".join(_string_list(row.get("gold_categories"))),
+            "gold_in_routes": bool(gold_categories.intersection(routed_categories)),
+            "classifier_confidence_distribution": ",".join(
+                f"{category}:{_metric(confidence)}"
+                for category, confidence in confidences
+            ),
+        }
+        output.append(detail)
+    return output
+
+
 def _variant_equivalence(
     grouped: Mapping[str, Mapping[str, Mapping[str, object]]],
 ) -> list[dict[str, object]]:
@@ -535,6 +587,37 @@ def _failure_cases(
         candidates.append(payload)
     candidates.sort(key=lambda row: (_failure_sort_metric(row), str(row["query_id"])))
     return candidates[:top_failures] if top_failures else []
+
+
+def _classifier_confidences(row: Mapping[str, object]) -> list[tuple[str, float]]:
+    payload = row.get("classifier_confidences")
+    if isinstance(payload, list):
+        parsed: list[tuple[str, float]] = []
+        for item in payload:
+            if not isinstance(item, Mapping):
+                continue
+            confidence = item.get("confidence")
+            if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+                continue
+            parsed.append((str(item.get("category", "")), float(confidence)))
+        if parsed:
+            return parsed
+
+    probabilities = row.get("query_probabilities")
+    if not isinstance(probabilities, Mapping):
+        return []
+    parsed_probabilities: list[tuple[str, float]] = []
+    for category, confidence in probabilities.items():
+        if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+            continue
+        parsed_probabilities.append((str(category), float(confidence)))
+    return sorted(parsed_probabilities, key=lambda item: (-item[1], item[0]))
+
+
+def _int_field(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
 
 
 def _failure_variant_payload(
