@@ -14,6 +14,7 @@ from darwin_rag_exp2.evaluation.retrieval_metrics import (
     retrieval_metrics_at_k,
 )
 
+from .faiss_backend import configure_faiss_threads
 from .routing import route_categories_for_query, top1_category
 from .types import (
     PrimaryRunSettings,
@@ -44,6 +45,7 @@ def run_primary_queries(
     """Run all primary variants for each query and return report rows."""
 
     _validate_search_options(search_mode, unified_candidate_k)
+    configure_faiss_threads(settings.faiss_threads)
     rows: list[dict[str, object]] = []
     for query in queries:
         variant_runs = (
@@ -299,6 +301,7 @@ def _settings_payload(settings: PrimaryRunSettings) -> dict[str, object]:
         "min_multi_route_width": settings.min_multi_route_width,
         "low_confidence_top1_threshold": settings.low_confidence_top1_threshold,
         "small_margin_threshold": settings.small_margin_threshold,
+        "faiss_threads": settings.faiss_threads,
     }
 
 

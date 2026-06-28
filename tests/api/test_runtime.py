@@ -1,4 +1,4 @@
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -365,7 +365,11 @@ def test_runtime_warm_starts_vllm_before_retrieval_components(tmp_path, monkeypa
     monkeypatch.setattr(runtime, "HashEmbeddingModel", FakeEmbedding)
     monkeypatch.setattr(runtime, "FinalQueryClassifier", FakeClassifier)
     monkeypatch.setattr(runtime, "FaissSearchBackend", FakeSearchBackend)
-    monkeypatch.setattr(runtime, "load_primary_run_settings", lambda path: object())
+    monkeypatch.setattr(
+        runtime,
+        "load_primary_run_settings",
+        lambda path: SimpleNamespace(faiss_threads=None),
+    )
     monkeypatch.setattr(
         runtime.ChunkStore,
         "from_parquet",
@@ -421,7 +425,11 @@ def test_runtime_passes_embedding_device_to_sentence_transformer(tmp_path, monke
     monkeypatch.setattr(runtime, "SentenceTransformerEmbeddingModel", FakeEmbedding)
     monkeypatch.setattr(runtime, "FinalQueryClassifier", FakeClassifier)
     monkeypatch.setattr(runtime, "FaissSearchBackend", lambda *args, **kwargs: object())
-    monkeypatch.setattr(runtime, "load_primary_run_settings", lambda path: object())
+    monkeypatch.setattr(
+        runtime,
+        "load_primary_run_settings",
+        lambda path: SimpleNamespace(faiss_threads=None),
+    )
     monkeypatch.setattr(
         runtime.ChunkStore,
         "from_parquet",

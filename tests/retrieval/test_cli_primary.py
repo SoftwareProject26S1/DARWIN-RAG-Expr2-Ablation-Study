@@ -12,8 +12,9 @@ class CliSearchBackend:
     category_calls: list[str] = []
     unified_top_k: list[int] = []
 
-    def __init__(self, indexes_dir) -> None:
+    def __init__(self, indexes_dir, *, faiss_threads=None) -> None:
         self.indexes_dir = indexes_dir
+        self.faiss_threads = faiss_threads
 
     def search_unified(self, query_embedding: list[float], *, top_k: int) -> list[SearchHit]:
         self.__class__.unified_top_k.append(top_k)

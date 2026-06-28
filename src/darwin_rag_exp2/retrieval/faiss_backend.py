@@ -13,10 +13,24 @@ import pyarrow.parquet as pq
 from .types import SearchHit
 
 
+def configure_faiss_threads(faiss_threads: int | None) -> None:
+    if faiss_threads is None:
+        return
+    if faiss_threads <= 0:
+        raise ValueError("faiss_threads must be positive when set")
+    try:
+        import faiss
+    except ImportError as error:
+        raise RuntimeError(
+            "faiss-cpu is required to configure FAISS threads"
+        ) from error
+    faiss.omp_set_num_threads(faiss_threads)
+
+
 class FaissSearchBackend:
     """Load frozen Phase 7 FAISS indexes and expose variant search methods."""
 
-    def __init__(self, indexes_dir: Path) -> None:
+    def __init__(self, indexes_dir: Path, *, faiss_threads: int | None = None) -> None:
         self.indexes_dir = indexes_dir
         self.manifest = _load_manifest(indexes_dir / "manifest.json")
         try:
@@ -28,6 +42,7 @@ class FaissSearchBackend:
             ) from error
 
         self._faiss = faiss
+        configure_faiss_threads(faiss_threads)
         self._unified_index = faiss.read_index(str(indexes_dir / "unified.faiss"))
         self._unified_id_rows = _load_id_map(indexes_dir / "unified_id_map.parquet")
         self._category_indexes: dict[str, Any] = {}

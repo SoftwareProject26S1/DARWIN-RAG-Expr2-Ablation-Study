@@ -40,6 +40,7 @@ def test_primary_run_settings_round_trip_yaml(tmp_path) -> None:
         theta_route=0.6,
         lambda_fixed=0.5,
         lambda_by_category={"학사": 0.9},
+        faiss_threads=2,
         tuning_metadata={"dev_metric": "ndcg@10"},
     )
 
@@ -55,8 +56,10 @@ def test_primary_run_settings_round_trip_yaml(tmp_path) -> None:
     assert settings.min_multi_route_width == 3
     assert settings.low_confidence_top1_threshold == 0.75
     assert settings.small_margin_threshold == 0.2
+    assert settings.faiss_threads == 2
     assert "dev_metric" in payload
     assert "min_multi_route_width: 3" in payload
+    assert "faiss_threads: 2" in payload
 
 
 def test_load_primary_settings_can_derive_lambdas_from_category_stats(tmp_path) -> None:
@@ -103,3 +106,4 @@ def test_load_primary_settings_can_derive_lambdas_from_category_stats(tmp_path) 
     assert settings.min_multi_route_width == 3
     assert settings.low_confidence_top1_threshold == 0.75
     assert settings.small_margin_threshold == 0.2
+    assert settings.faiss_threads is None

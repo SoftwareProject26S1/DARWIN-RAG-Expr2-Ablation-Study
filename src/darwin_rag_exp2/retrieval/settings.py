@@ -24,8 +24,8 @@ def build_lambda_by_category(
     lambdas: dict[str, float] = {}
     for row in category_stats_rows:
         category = str(row["category"])
-        mu_confidence = float(row["mu_confidence"])
-        sigma_confidence = float(row["sigma_confidence"])
+        mu_confidence = _float_field(row, "mu_confidence")
+        sigma_confidence = _float_field(row, "sigma_confidence")
         value = alpha * (mu_confidence - tau) - rho * sigma_confidence
         lambdas[category] = _metric(_sigmoid(value))
     return lambdas
@@ -58,6 +58,9 @@ def load_primary_run_settings(
         )
     if not isinstance(lambda_by_category, dict):
         raise ValueError("lambda_by_category must be a mapping")
+    faiss_threads = payload.get("faiss_threads")
+    if faiss_threads is not None and int(faiss_threads) <= 0:
+        raise ValueError("faiss_threads must be positive when set")
     return PrimaryRunSettings(
         candidate_k_per_partition=int(payload["candidate_k_per_partition"]),
         report_top_k=int(payload["report_top_k"]),
@@ -73,6 +76,7 @@ def load_primary_run_settings(
             payload.get("low_confidence_top1_threshold", 0.75)
         ),
         small_margin_threshold=float(payload.get("small_margin_threshold", 0.2)),
+        faiss_threads=None if faiss_threads is None else int(faiss_threads),
     )
 
 
@@ -88,6 +92,7 @@ def write_primary_run_settings(
     min_multi_route_width: int = 3,
     low_confidence_top1_threshold: float = 0.75,
     small_margin_threshold: float = 0.2,
+    faiss_threads: int | None = None,
     tuning_metadata: Mapping[str, object] | None = None,
 ) -> None:
     """Write frozen Phase 9 settings as YAML."""
@@ -106,6 +111,10 @@ def write_primary_run_settings(
         "low_confidence_top1_threshold": low_confidence_top1_threshold,
         "small_margin_threshold": small_margin_threshold,
     }
+    if faiss_threads is not None:
+        if faiss_threads <= 0:
+            raise ValueError("faiss_threads must be positive when set")
+        payload["faiss_threads"] = faiss_threads
     if tuning_metadata:
         payload["tuning_metadata"] = dict(tuning_metadata)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +134,13 @@ def _load_category_stats_rows(path: Path) -> list[dict[str, object]]:
     if not isinstance(rows, list):
         raise ValueError("category stats must contain a rows list")
     return [dict(row) for row in rows]
+
+
+def _float_field(row: Mapping[str, object], key: str) -> float:
+    value = row[key]
+    if not isinstance(value, int | float | str):
+        raise ValueError(f"{key} must be numeric")
+    return float(value)
 
 
 def _sigmoid(value: float) -> float:

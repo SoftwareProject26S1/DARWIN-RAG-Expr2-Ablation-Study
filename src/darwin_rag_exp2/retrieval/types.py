@@ -89,6 +89,7 @@ class PrimaryRunSettings:
     min_multi_route_width: int = 3
     low_confidence_top1_threshold: float = 0.75
     small_margin_threshold: float = 0.2
+    faiss_threads: int | None = None
 
 
 class SearchBackend(Protocol):
@@ -101,6 +102,7 @@ class SearchBackend(Protocol):
         top_k: int,
     ) -> list[SearchHit]:
         """Return top hits from the unified index."""
+        ...
 
     def search_category(
         self,
@@ -110,3 +112,4 @@ class SearchBackend(Protocol):
         top_k: int,
     ) -> list[SearchHit]:
         """Return top hits from one category partition index."""
+        ...

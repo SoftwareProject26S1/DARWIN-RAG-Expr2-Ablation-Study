@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from darwin_rag_exp2.indexing.embeddings import EmbeddingModel, l2_normalize
+from darwin_rag_exp2.retrieval.faiss_backend import configure_faiss_threads
 from darwin_rag_exp2.retrieval.types import (
     PrimaryRunSettings,
     QueryFeatures,
@@ -25,6 +26,7 @@ class QueryClassifier(Protocol):
 
     def predict_probabilities(self, texts: Sequence[str]) -> list[dict[str, float]]:
         """Return category probabilities for each input text."""
+        ...
 
 
 class AnswerGenerator(Protocol):
@@ -32,6 +34,7 @@ class AnswerGenerator(Protocol):
 
     def generate(self, prompt: str) -> str:
         """Generate an answer from an augmented prompt."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,7 @@ class MessageService:
         self.chunk_store = chunk_store
         self.generator = generator
         self.normalize_embeddings = normalize_embeddings
+        configure_faiss_threads(settings.faiss_threads)
 
     def answer(self, query: str) -> str:
         """Return an LLM answer augmented by P-score retrieval contexts."""

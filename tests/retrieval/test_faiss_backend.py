@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+from numpy.typing import NDArray
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -15,7 +16,7 @@ class FakeIndex:
         self.distances = distances
         self.ids = ids
 
-    def search(self, query_vectors: np.ndarray, top_k: int):
+    def search(self, query_vectors: NDArray[np.float32], top_k: int):
         assert query_vectors.dtype == np.float32
         assert query_vectors.shape == (1, 2)
         return (
@@ -98,3 +99,33 @@ def test_faiss_search_backend_maps_unified_and_category_hits(tmp_path, monkeypat
     assert category_hits[0].chunk_id == "c2"
     assert category_hits[0].source_category == "학사"
     assert category_hits[0].similarity == pytest.approx(0.8)
+
+
+def test_faiss_search_backend_sets_thread_count(tmp_path, monkeypatch) -> None:
+    indexes_path = tmp_path / "indexes"
+    indexes_path.mkdir()
+    (indexes_path / "unified.faiss").write_bytes(b"fake")
+    (indexes_path / "manifest.json").write_bytes(orjson.dumps({"category_indexes": []}))
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "vector_index": 0,
+                    "chunk_id": "c0",
+                    "source_id": "s0",
+                    "source_category": "학사",
+                }
+            ]
+        ),
+        indexes_path / "unified_id_map.parquet",
+    )
+    calls: list[int] = []
+    fake_faiss = SimpleNamespace(
+        omp_set_num_threads=calls.append,
+        read_index=lambda path: FakeIndex(distances=[0.7], ids=[0]),
+    )
+    monkeypatch.setitem(sys.modules, "faiss", fake_faiss)
+
+    _ = FaissSearchBackend(indexes_path, faiss_threads=2)
+
+    assert calls == [2]
