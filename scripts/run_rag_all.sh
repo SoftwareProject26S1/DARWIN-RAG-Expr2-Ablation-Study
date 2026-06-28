@@ -7,8 +7,8 @@ if [[ $# -gt 0 ]]; then
 fi
 
 QUERIES="${QUERIES:-data/annotations/queries_test_v2.jsonl}"
-SETTINGS="${SETTINGS:-artifacts/settings/primary_top3/frozen.yaml}"
-INDEXES="${INDEXES:-artifacts/indexes_top3}"
+SETTINGS="${SETTINGS:-artifacts/settings/primary-top3/frozen.yaml}"
+INDEXES="${INDEXES:-artifacts/indexes-top3}"
 CHUNKS="${CHUNKS:-artifacts/chunks/chunks.parquet}"
 CONFIG="${CONFIG:-configs/experiment.default.yaml}"
 EMBEDDING_BACKEND="${EMBEDDING_BACKEND:-sentence-transformers}"
