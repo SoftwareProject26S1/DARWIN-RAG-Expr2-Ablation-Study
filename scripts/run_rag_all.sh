@@ -8,7 +8,7 @@ fi
 
 QUERIES="${QUERIES:-data/annotations/queries_test_v2.jsonl}"
 SETTINGS="${SETTINGS:-artifacts/settings/primary-top3/frozen.yaml}"
-INDEXES="${INDEXES:-artifacts/indexes-top3}"
+INDEXES="${INDEXES:-artifacts/indexes/indexes_top3}"
 CHUNKS="${CHUNKS:-artifacts/chunks/chunks.parquet}"
 CONFIG="${CONFIG:-configs/experiment.default.yaml}"
 EMBEDDING_BACKEND="${EMBEDDING_BACKEND:-sentence-transformers}"
