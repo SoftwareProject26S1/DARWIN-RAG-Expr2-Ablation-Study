@@ -9,7 +9,6 @@ experiment:
     - "봉사"
     - "국제교류"
     - "외국인유학생"
-    - "교원채용"
   excluded_primary_categories:
     - "기타"
     - "미분류"

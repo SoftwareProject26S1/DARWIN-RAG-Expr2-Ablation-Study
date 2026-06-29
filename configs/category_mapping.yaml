@@ -6,7 +6,7 @@ primary_category_mapping:
   "봉사": "봉사"
   "국제교류": "국제교류"
   "외국인유학생": "외국인유학생"
-  "교원채용": "교원채용"
+  "교원채용": "채용"
 
 excluded_categories:
   "기타": "ambiguous_or_mixed_site_category"

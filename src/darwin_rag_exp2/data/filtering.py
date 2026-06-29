@@ -245,12 +245,9 @@ def prepare_corpus(
                 )
             )
             continue
-        admitted_records.append(record)
+        admitted_records.append(record.model_copy(update={"category": mapped_category}))
 
-    admitted_counts = Counter(
-        config.category_mapping.get(record.category, record.category)
-        for record in admitted_records
-    )
+    admitted_counts = Counter(record.category for record in admitted_records)
     reason_counts = Counter(record.reason for record in excluded_records)
 
     return CorpusPreparationResult(
