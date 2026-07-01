@@ -1,0 +1,328 @@
+"""Phase 9 primary retrieval run orchestration and artifact writing."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from functools import partial
+from pathlib import Path
+from time import perf_counter
+
+import orjson
+
+from darwin_rag_exp2.evaluation.retrieval_metrics import (
+    graded_retrieval_metrics_at_k,
+    retrieval_metrics_at_k,
+)
+
+from .faiss_backend import configure_faiss_threads
+from .routing import route_categories_for_query, top1_category
+from .types import (
+    PrimaryRunSettings,
+    QueryFeatures,
+    RankedChunk,
+    SearchBackend,
+    VariantResult,
+)
+from .variants import (
+    SEARCH_MODE_CATEGORY_SCORE_MERGE,
+    SEARCH_MODE_UNIFIED_PRIOR_RERANK,
+    SEARCH_MODES,
+    run_b0,
+    run_b1,
+    run_b2_score,
+    run_p_score,
+)
+
+
+def run_primary_queries(
+    queries: Sequence[QueryFeatures],
+    *,
+    search_backend: SearchBackend,
+    settings: PrimaryRunSettings,
+    search_mode: str = SEARCH_MODE_CATEGORY_SCORE_MERGE,
+    unified_candidate_k: int = 100,
+) -> list[dict[str, object]]:
+    """Run all primary variants for each query and return report rows."""
+
+    _validate_search_options(search_mode, unified_candidate_k)
+    configure_faiss_threads(settings.faiss_threads)
+    rows: list[dict[str, object]] = []
+    for query in queries:
+        variant_runs = (
+            partial(run_b0, query, search_backend=search_backend, settings=settings),
+            partial(run_b1, query, search_backend=search_backend, settings=settings),
+            partial(
+                run_b2_score, query, search_backend=search_backend,
+                settings=settings, search_mode=search_mode,
+                unified_candidate_k=unified_candidate_k,
+            ),
+            partial(
+                run_p_score, query, search_backend=search_backend,
+                settings=settings, search_mode=search_mode,
+                unified_candidate_k=unified_candidate_k,
+            ),
+        )
+        for run_variant in variant_runs:
+            started_at = perf_counter()
+            variant_result = run_variant()
+            retrieval_time_ms = (perf_counter() - started_at) * 1000.0
+            rows.append(
+                _result_row(
+                    query,
+                    variant_result,
+                    settings,
+                    retrieval_time_ms=retrieval_time_ms,
+                    search_mode=search_mode,
+                    unified_candidate_k=unified_candidate_k,
+                )
+            )
+    return rows
+
+
+def write_primary_run(
+    *,
+    output_dir: Path,
+    result_rows: Sequence[Mapping[str, object]],
+    settings: PrimaryRunSettings,
+    run_metadata: Mapping[str, object] | None = None,
+) -> None:
+    """Write Phase 9 result rows and a small manifest."""
+
+    validate_primary_result_rows(result_rows)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(output_dir / "results.jsonl", result_rows)
+    query_ids = {str(row["query_id"]) for row in result_rows}
+    variants = {str(row["variant"]) for row in result_rows}
+    manifest: dict[str, object] = {
+        "phase": 9,
+        "artifact_type": "primary_retrieval_run",
+        "query_count": len(query_ids),
+        "variant_count": len(variants),
+        "row_count": len(result_rows),
+        "variants": sorted(variants),
+        "settings": _settings_payload(settings),
+        "artifact_files": ["results.jsonl", "manifest.json"],
+    }
+    if run_metadata:
+        manifest["run_metadata"] = dict(run_metadata)
+    _write_json(output_dir / "manifest.json", manifest)
+
+
+def validate_primary_result_rows(result_rows: Sequence[Mapping[str, object]]) -> None:
+    for index, row in enumerate(result_rows, start=1):
+        value = row.get("retrieval_time_ms")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or value < 0
+        ):
+            raise ValueError(
+                f"primary result row {index} has invalid retrieval_time_ms: {value!r}"
+            )
+
+
+def _result_row(
+    query: QueryFeatures,
+    variant_result: VariantResult,
+    settings: PrimaryRunSettings,
+    *,
+    retrieval_time_ms: float,
+    search_mode: str,
+    unified_candidate_k: int,
+) -> dict[str, object]:
+    metric_values = retrieval_metrics_at_k(
+        ranked_chunk_ids=[row.chunk_id for row in variant_result.top10],
+        gold_chunk_ids=query.gold_chunks,
+        k=settings.report_top_k,
+    )
+    if query.graded_relevance:
+        metric_values.update(
+            graded_retrieval_metrics_at_k(
+                ranked_chunk_ids=[row.chunk_id for row in variant_result.top10],
+                relevance_by_chunk_id=query.graded_relevance,
+                k=settings.report_top_k,
+            )
+        )
+    routing = _routing_payload(
+        query,
+        variant_result.variant,
+        settings,
+        search_mode=search_mode,
+        unified_candidate_k=unified_candidate_k,
+    )
+    row: dict[str, object] = {
+        "query_id": query.query_id,
+        "query": query.query,
+        "variant": variant_result.variant,
+        "query_type": query.query_type,
+        "gold_chunks": list(query.gold_chunks),
+        "gold_categories": list(query.gold_categories),
+        "query_probabilities": dict(query.probabilities),
+        "retrieval_time_ms": retrieval_time_ms,
+        "routing": routing,
+        "metrics": metric_values,
+        "top10": [_ranked_payload(row) for row in variant_result.top10],
+        "top5_contexts": list(map(_ranked_payload, variant_result.top5_contexts)),
+    }
+    if variant_result.variant != "B0":
+        row["classifier_confidences"] = _classifier_confidence_payload(
+            query.probabilities,
+            _confidence_routed_categories(
+                query,
+                variant_result.variant,
+                settings,
+                search_mode=search_mode,
+            ),
+        )
+    if query.graded_relevance:
+        row["graded_relevance"] = dict(query.graded_relevance)
+    if query.neighbor_chunk_ids:
+        row["neighbor_chunk_ids"] = list(query.neighbor_chunk_ids)
+    if query.source_id:
+        row["source_id"] = query.source_id
+    if query.evidence_unit:
+        row["evidence_unit"] = query.evidence_unit
+    if query.schema_version:
+        row["schema_version"] = query.schema_version
+    return row
+
+
+def _routing_payload(
+    query: QueryFeatures,
+    variant: str,
+    settings: PrimaryRunSettings,
+    *,
+    search_mode: str,
+    unified_candidate_k: int,
+) -> dict[str, object]:
+    top1 = top1_category(query.probabilities)
+    if variant == "B0":
+        return {
+            "mode": "unified",
+            "search_mode": search_mode,
+            "candidate_depth": settings.report_top_k,
+            "top1_category": top1,
+            "routed_categories": [],
+            "route_width": 0,
+        }
+    if variant == "B1":
+        return {
+            "mode": "top1",
+            "search_mode": search_mode,
+            "candidate_depth": settings.report_top_k,
+            "top1_category": top1,
+            "routed_categories": [top1],
+            "route_width": 1,
+        }
+
+    if search_mode == SEARCH_MODE_UNIFIED_PRIOR_RERANK:
+        return {
+            "mode": "unified_prior_rerank",
+            "search_mode": search_mode,
+            "candidate_depth": unified_candidate_k,
+            "top1_category": top1,
+            "routed_categories": [],
+            "route_width": 0,
+        }
+
+    decision = route_categories_for_query(query, settings)
+    return {
+        "mode": decision.mode,
+        "search_mode": search_mode,
+        "candidate_depth": settings.candidate_k_per_partition,
+        "top1_category": decision.top1_category,
+        "routed_categories": list(decision.categories),
+        "route_width": len(decision.categories),
+    }
+
+
+def _ranked_payload(row: RankedChunk) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "chunk_id": row.chunk_id,
+        "source_id": row.source_id,
+        "source_category": row.source_category,
+        "partition_category": row.partition_category,
+        "rank": row.rank,
+        "score": row.score,
+        "similarity": row.similarity,
+        "similarity_norm": row.similarity_norm,
+        "query_category_probability": row.query_category_probability,
+        "lambda_value": row.lambda_value,
+        "scoring_method": row.scoring_method,
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _classifier_confidence_payload(
+    probabilities: Mapping[str, float],
+    routed_categories: Sequence[str],
+) -> list[dict[str, object]]:
+    routed = set(routed_categories)
+    ranked = sorted(probabilities.items(), key=lambda item: (-item[1], item[0]))
+    return [
+        {
+            "category": category,
+            "confidence": _confidence_metric(confidence),
+            "rank": index,
+            "routed": category in routed,
+        }
+        for index, (category, confidence) in enumerate(ranked, start=1)
+    ]
+
+
+def _confidence_routed_categories(
+    query: QueryFeatures,
+    variant: str,
+    settings: PrimaryRunSettings,
+    *,
+    search_mode: str,
+) -> list[str]:
+    if variant == "B0":
+        return []
+    if variant == "B1":
+        return [top1_category(query.probabilities)]
+    if search_mode == SEARCH_MODE_UNIFIED_PRIOR_RERANK:
+        return []
+    return list(route_categories_for_query(query, settings).categories)
+
+
+def _confidence_metric(value: float) -> float:
+    return round(float(value), 12)
+
+
+def _settings_payload(settings: PrimaryRunSettings) -> dict[str, object]:
+    return {
+        "candidate_k_per_partition": settings.candidate_k_per_partition,
+        "report_top_k": settings.report_top_k,
+        "generation_context_top_n": settings.generation_context_top_n,
+        "theta_route": settings.theta_route,
+        "lambda_fixed": settings.lambda_fixed,
+        "lambda_by_category": dict(settings.lambda_by_category),
+        "min_multi_route_width": settings.min_multi_route_width,
+        "low_confidence_top1_threshold": settings.low_confidence_top1_threshold,
+        "small_margin_threshold": settings.small_margin_threshold,
+        "faiss_threads": settings.faiss_threads,
+    }
+
+
+def _validate_search_options(search_mode: str, unified_candidate_k: int) -> None:
+    if search_mode not in SEARCH_MODES:
+        raise ValueError(
+            f"unknown search mode {search_mode!r}; expected one of {SEARCH_MODES}"
+        )
+    if unified_candidate_k <= 0:
+        raise ValueError("unified_candidate_k must be positive")
+
+
+def _write_json(path: Path, payload: Mapping[str, object]) -> None:
+    _ = path.write_bytes(
+        orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS)
+        + b"\n"
+    )
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
+    with path.open("wb") as output:
+        for row in rows:
+            _ = output.write(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
+            _ = output.write(b"\n")

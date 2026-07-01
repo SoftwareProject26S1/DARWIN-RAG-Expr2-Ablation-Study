@@ -42,7 +42,13 @@ class HashEmbeddingModel:
 class SentenceTransformerEmbeddingModel:
     """SentenceTransformers wrapper for the documented BAAI/bge-m3 embedder."""
 
-    def __init__(self, model_name: str, *, batch_size: int = 32) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        batch_size: int = 32,
+        device: str | None = None,
+    ) -> None:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as error:
@@ -52,7 +58,7 @@ class SentenceTransformerEmbeddingModel:
             ) from error
         self.model_name = model_name
         self.batch_size = batch_size
-        self._model = SentenceTransformer(model_name)
+        self._model = SentenceTransformer(model_name, device=device)
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:
         vectors = self._model.encode(

@@ -26,7 +26,7 @@ class EmbeddingArtifactResult:
 class LoadedEmbeddingArtifacts:
     """Validated precomputed embedding matrix and metadata."""
 
-    vectors: np.ndarray
+    vectors: np.ndarray[tuple[int, ...], np.dtype[np.float32]]
     manifest: dict[str, object]
 
 
@@ -42,7 +42,7 @@ def build_embedding_artifacts(
     """Embed canonical chunk rows and write reusable vectors plus id map."""
 
     chunk_rows = _read_chunk_rows(chunks_path)
-    vectors = embedding_model.encode([str(row["body_text"]) for row in chunk_rows])
+    vectors = embedding_model.encode([str(row["embedding_text"]) for row in chunk_rows])
     if len(vectors) != len(chunk_rows):
         raise ValueError("embedding model returned a different row count")
     normalized_vectors = l2_normalize(vectors) if normalize_embeddings else [
@@ -170,7 +170,7 @@ def _read_chunk_rows(path: Path) -> list[dict[str, object]]:
     rows = table.to_pylist()
     if not rows:
         raise ValueError(f"no chunks found in {path}")
-    required = {"chunk_id", "source_id", "category", "body_text"}
+    required = {"chunk_id", "source_id", "category", "body_text", "embedding_text"}
     for row in rows:
         missing = required.difference(row)
         if missing:

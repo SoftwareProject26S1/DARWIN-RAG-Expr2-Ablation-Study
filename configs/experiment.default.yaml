@@ -9,7 +9,6 @@ experiment:
     - "봉사"
     - "국제교류"
     - "외국인유학생"
-    - "교원채용"
   excluded_primary_categories:
     - "기타"
     - "미분류"
@@ -38,10 +37,15 @@ retrieval:
   generation_context_top_n: 5
   fixed_lambda_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
+indexing:
+  ingest_threshold: 0.7
+  partition_top_k: 3
+
 models:
   classifier: klue/bert-base
   embedder: BAAI/bge-m3
   generator: mlx-community/Qwen3-8B-4bit
+  generator_vllm: Qwen/Qwen2.5-7B-Instruct
   generator_fallback: mlx-community/Qwen2.5-7B-Instruct-4bit
 
 evaluation:

@@ -1,5 +1,7 @@
 import math
 import json
+from types import SimpleNamespace
+import sys
 
 import numpy as np
 import pyarrow as pa
@@ -10,7 +12,11 @@ from darwin_rag_exp2.indexing.embedding_artifacts import (
     build_embedding_artifacts,
     load_embedding_artifacts,
 )
-from darwin_rag_exp2.indexing.embeddings import HashEmbeddingModel, l2_normalize
+from darwin_rag_exp2.indexing.embeddings import (
+    HashEmbeddingModel,
+    SentenceTransformerEmbeddingModel,
+    l2_normalize,
+)
 
 
 def test_l2_normalize_makes_each_vector_unit_length() -> None:
@@ -40,6 +46,24 @@ def test_hash_embedding_model_is_deterministic_and_normalized() -> None:
         round(math.sqrt(sum(value * value for value in row)), 12) == 1.0
         for row in first
     )
+
+
+def test_sentence_transformer_embedding_model_passes_device(monkeypatch) -> None:
+    calls = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name, *, device=None):
+            calls.append({"model_name": model_name, "device": device})
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    SentenceTransformerEmbeddingModel("BAAI/bge-m3", device="cuda:1")
+
+    assert calls == [{"model_name": "BAAI/bge-m3", "device": "cuda:1"}]
 
 
 def test_build_embedding_artifacts_writes_vectors_id_map_and_manifest(tmp_path) -> None:
@@ -91,6 +115,37 @@ def test_build_embedding_artifacts_writes_vectors_id_map_and_manifest(tmp_path) 
     assert manifest["similarity_metric"] == "cosine_via_inner_product"
     assert manifest["vectors_sha256"] == result.manifest["vectors_sha256"]
     assert manifest["id_map_sha256"] == result.manifest["id_map_sha256"]
+
+
+def test_build_embedding_artifacts_encodes_embedding_text(tmp_path) -> None:
+    chunks_path = tmp_path / "chunks.parquet"
+    output_path = tmp_path / "embeddings"
+    embedding_model = RecordingEmbeddingModel()
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                chunk_row(
+                    "c1",
+                    "s1",
+                    "학사",
+                    "본문만",
+                    embedding_text="제목 포함\n\n본문만",
+                ),
+            ]
+        ),
+        chunks_path,
+    )
+
+    build_embedding_artifacts(
+        chunks_path=chunks_path,
+        output_dir=output_path,
+        embedding_model=embedding_model,
+        embedding_model_name="recording",
+        normalize_embeddings=False,
+        similarity_metric="cosine_via_inner_product",
+    )
+
+    assert embedding_model.encoded_texts == ["제목 포함\n\n본문만"]
 
 
 def test_load_embedding_artifacts_rejects_chunk_id_order_mismatch(tmp_path) -> None:
@@ -147,10 +202,22 @@ def chunk_row(
     source_id: str,
     category: str,
     body_text: str,
+    *,
+    embedding_text: str | None = None,
 ) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
         "source_id": source_id,
         "category": category,
         "body_text": body_text,
+        "embedding_text": embedding_text or body_text,
     }
+
+
+class RecordingEmbeddingModel:
+    def __init__(self) -> None:
+        self.encoded_texts: list[str] = []
+
+    def encode(self, texts) -> list[list[float]]:
+        self.encoded_texts = list(texts)
+        return [[1.0, 0.0] for _ in self.encoded_texts]

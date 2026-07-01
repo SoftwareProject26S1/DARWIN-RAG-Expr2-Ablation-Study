@@ -112,6 +112,37 @@ def test_prepare_corpus_rejects_primary_categories_below_minimum(tmp_path) -> No
     assert corpus.excluded_records[0].reason == "category_below_minimum"
 
 
+def test_prepare_corpus_writes_mapped_category_on_admitted_records(tmp_path) -> None:
+    source = tmp_path / "notices.jsonl"
+    write_records(
+        source,
+        [
+            notice_record(
+                id="faculty-1",
+                category="교원채용",
+                text="교원 채용 " + long_body(),
+            ),
+            notice_record(
+                id="staff-1",
+                category="채용",
+                text="직원 채용 " + long_body(),
+            ),
+        ],
+    )
+    config = CorpusFilterConfig(
+        primary_categories=("채용",),
+        excluded_category_reasons={},
+        minimum_body_tokens=30,
+        min_primary_source_documents=2,
+        category_mapping={"교원채용": "채용"},
+    )
+
+    corpus = prepare_corpus(source, config)
+
+    assert [record.category for record in corpus.admitted_records] == ["채용", "채용"]
+    assert corpus.admitted_category_counts == {"채용": 2}
+
+
 def test_write_corpus_artifacts_serializes_outputs_and_manifest(tmp_path) -> None:
     source = tmp_path / "notices.jsonl"
     output = tmp_path / "corpus"

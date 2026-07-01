@@ -24,8 +24,15 @@ class Tokenizer(Protocol):
 
     name_or_path: str
 
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[Any]:
+    def encode(
+        self,
+        text: str,
+        add_special_tokens: bool = False,
+        truncation: bool = False,
+        verbose: bool = False,
+    ) -> list[Any]:
         """Return token ids or token-like values for budget accounting."""
+        ...
 
     def decode(
         self,
@@ -34,6 +41,7 @@ class Tokenizer(Protocol):
         clean_up_tokenization_spaces: bool = False,
     ) -> str:
         """Return text for a previously encoded token sequence."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -59,6 +67,7 @@ class NoticeChunk:
     title: str
     title_prefix: str
     body_text: str
+    embedding_text: str
     classifier_text: str
     body_token_count: int
     title_token_count: int
@@ -110,17 +119,28 @@ def load_chunking_config(config_path: Path) -> ChunkingConfig:
     if not isinstance(tokenizer_name, str):
         raise ValueError("chunking.counting_tokenizer must be a string")
 
-    integer_fields = {
-        "target_body_tokens": chunking.get("target_body_tokens"),
-        "overlap_body_tokens": chunking.get("overlap_body_tokens"),
-        "minimum_information_tokens": chunking.get("minimum_information_tokens"),
-        "title_prefix_max_tokens": chunking.get("title_prefix_max_tokens"),
-        "classifier_max_tokens": chunking.get("classifier_max_tokens"),
-    }
-    if not all(isinstance(value, int) for value in integer_fields.values()):
+    target_body_tokens = chunking.get("target_body_tokens")
+    overlap_body_tokens = chunking.get("overlap_body_tokens")
+    minimum_information_tokens = chunking.get("minimum_information_tokens")
+    title_prefix_max_tokens = chunking.get("title_prefix_max_tokens")
+    classifier_max_tokens = chunking.get("classifier_max_tokens")
+    if (
+        not isinstance(target_body_tokens, int)
+        or not isinstance(overlap_body_tokens, int)
+        or not isinstance(minimum_information_tokens, int)
+        or not isinstance(title_prefix_max_tokens, int)
+        or not isinstance(classifier_max_tokens, int)
+    ):
         raise ValueError("all chunking token budget fields must be integers")
 
-    loaded = ChunkingConfig(tokenizer_name=tokenizer_name, **integer_fields)
+    loaded = ChunkingConfig(
+        tokenizer_name=tokenizer_name,
+        target_body_tokens=target_body_tokens,
+        overlap_body_tokens=overlap_body_tokens,
+        minimum_information_tokens=minimum_information_tokens,
+        title_prefix_max_tokens=title_prefix_max_tokens,
+        classifier_max_tokens=classifier_max_tokens,
+    )
     _validate_config(loaded)
     return loaded
 
@@ -469,6 +489,7 @@ def _chunk_record(
                 title=record.title,
                 title_prefix=title_prefix,
                 body_text=segment,
+                embedding_text=classifier_text,
                 classifier_text=classifier_text,
                 body_token_count=len(body_tokens),
                 title_token_count=title_token_count,

@@ -311,7 +311,7 @@ vectors.
 
 **Purpose**
 
-Create a controlled human-annotation input for tuning and final evaluation.
+Create a controlled v2 human-annotation input for tuning and final evaluation.
 
 **Files**
 
@@ -323,21 +323,32 @@ Create a controlled human-annotation input for tuning and final evaluation.
 
 **Contract**
 
-- `queries_dev.jsonl`: 80 annotated queries.
-- `queries_test.jsonl`: 240 annotated queries.
-- Around 30 percent of each set is `multi_category` or `ambiguous`.
-- Rows contain `query_id`, `query`, `gold_chunks`, `reference_answer`,
-  `gold_categories`, and `query_type`.
+- `queries_dev_v2.jsonl`: 80 annotated queries for settings selection only.
+- `queries_test_v2.jsonl`: 240 annotated queries for final evaluation only.
+- Every row uses `schema_version: eval_v3_overlap_aware_rechunked`.
+- Rows contain `query_id`, `query`, `reference_answer`, `query_type`,
+  `expected_categories`, `source_id`, structured `gold_chunk_ids`,
+  `neighbor_chunk_ids`, `graded_relevance`, `requires_multi_category`,
+  `gold_category_set`, `gold_category_pure`, and `evidence_unit`.
+- `gold_chunk_ids` entries contain `chunk_id`, `source_id`, `chunk_index`,
+  `relevance`, and `role`; valid roles are `direct`, `direct_overlap`, and
+  `support`.
+- `graded_relevance` keys exactly match `gold_chunk_ids[*].chunk_id`.
+- `expected_categories` and `gold_category_set` use the fixed primary category
+  set and must agree.
 
 **Verification**
 
 ```bash
 uv run pytest tests/evaluation/test_queries.py
-uv run darwin-exp2 validate-queries --dev data/annotations/queries_dev.jsonl --test data/annotations/queries_test.jsonl
+uv run darwin-exp2 validate-queries \
+  --dev data/annotations/queries_dev_v2.jsonl \
+  --test data/annotations/queries_test_v2.jsonl \
+  --output artifacts/query_validation/v2
 ```
 
 Expected evidence: non-overlapping dev/test IDs, resolvable gold chunk IDs,
-category/type distribution report, and frozen query hashes.
+category/type distribution report, v2 schema summaries, and frozen query hashes.
 
 ## Phase 9: Primary Score-Merge Retrieval Variants
 
@@ -378,13 +389,24 @@ calibration step.
 
 ```bash
 uv run pytest tests/retrieval
-uv run darwin-exp2 tune-primary --queries data/annotations/queries_dev.jsonl --indexes artifacts/indexes --output artifacts/settings/primary
-uv run darwin-exp2 run-primary --queries data/annotations/queries_test.jsonl --settings artifacts/settings/primary/frozen.yaml --output runs/primary
+uv run darwin-exp2 tune-primary \
+  --queries data/annotations/queries_dev_v2.jsonl \
+  --indexes artifacts/indexes \
+  --output artifacts/settings/primary \
+  --query-classifier artifacts/classifier/final
+uv run darwin-exp2 run-primary \
+  --queries data/annotations/queries_test_v2.jsonl \
+  --settings artifacts/settings/primary/frozen.yaml \
+  --indexes artifacts/indexes \
+  --output runs/primary \
+  --query-classifier artifacts/classifier/final
 ```
 
 Expected evidence: the vanilla RRF invariance fixture proves it cannot
-distinguish fixed/adaptive lambda, while `B2-score` and `P-score` produce
-paired Top-10 test result files under frozen settings.
+distinguish fixed/adaptive lambda, while `B0`, `B1`, `B2-score`, and
+`P-score` produce four rows per test query under frozen settings. Every result
+row records retrieval-only `retrieval_time_ms`; test data is not used for
+tuning.
 
 ## Phase 10: Local Generation And Automated Metrics
 
@@ -408,7 +430,7 @@ answer without external model drift.
 
 ```bash
 uv run pytest tests/generation
-uv run darwin-exp2 generate-answers --runs runs/primary --queries data/annotations/queries_test.jsonl --model mlx-community/Qwen3-8B-4bit --output runs/generation
+uv run darwin-exp2 generate-answers --runs runs/primary --queries data/annotations/queries_test_v2.jsonl --model mlx-community/Qwen3-8B-4bit --output runs/generation
 ```
 
 Expected evidence: all primary variants use exactly five context chunks per
@@ -435,6 +457,12 @@ hypotheses without modifying frozen experiment inputs.
 
 ```bash
 uv run pytest
+uv run darwin-exp2 analyze-primary \
+  --run runs/primary \
+  --chunks artifacts/chunks/chunks.parquet \
+  --output runs/analysis/primary \
+  --metric ndcg@10 \
+  --top-failures 20
 uv run darwin-exp2 report --primary runs/primary --generation runs/generation --output runs/report
 ```
 
@@ -443,7 +471,12 @@ Expected artifacts:
 - Primary table for `P-score` versus `B2-score` with paired differences,
   Wilcoxon p-value, and paired bootstrap 95 percent confidence interval.
 - Primary category and query-type diagnostic breakdown tables.
-- Retrieval-only latency median/p95/p99 tables and plots.
+- `summary.json`, `metrics_by_variant.csv`, `retrieval_time_by_variant.csv`,
+  `retrieval_time_by_query_type.csv`, `paired_comparison.json`,
+  `paired_deltas.csv`, `failure_cases.jsonl`, and `report.html` from
+  `analyze-primary`.
+- Retrieval-only latency tables include `retrieval_time_ms` count, mean, min,
+  max, and median by variant and by query type.
 - Complete manifest linking raw-data, model, index, settings, query, and run
   hashes.
 
@@ -506,8 +539,8 @@ adaptive weighting observation.
 
 ```bash
 uv run pytest tests/retrieval/test_weighted_rrf.py
-uv run darwin-exp2 tune-wrrf --queries data/annotations/queries_dev.jsonl --indexes artifacts/indexes --config configs/optional.wrrf.yaml --output artifacts/settings/wrrf
-uv run darwin-exp2 run-wrrf --queries data/annotations/queries_test.jsonl --settings artifacts/settings/wrrf/frozen.yaml --output runs/wrrf
+uv run darwin-exp2 tune-wrrf --queries data/annotations/queries_dev_v2.jsonl --indexes artifacts/indexes --config configs/optional.wrrf.yaml --output artifacts/settings/wrrf
+uv run darwin-exp2 run-wrrf --queries data/annotations/queries_test_v2.jsonl --settings artifacts/settings/wrrf/frozen.yaml --output runs/wrrf
 ```
 
 Expected evidence: `B2-wrrf` and `P-wrrf` outputs contain per-category
