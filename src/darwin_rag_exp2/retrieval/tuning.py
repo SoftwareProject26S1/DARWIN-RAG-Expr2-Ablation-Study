@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Final
 
 from darwin_rag_exp2.evaluation.queries import V2_SCHEMA_VERSION
 from darwin_rag_exp2.evaluation.retrieval_metrics import retrieval_metrics_at_k
@@ -13,6 +14,9 @@ from .types import PrimaryRunSettings, QueryFeatures, SearchBackend
 from .variants import run_b2_score, run_p_score
 
 QueryRowValue = str | int | float | bool | list[str] | dict[str, float] | None
+MetricBreakdown = dict[str, float | int]
+MetricBreakdownByQueryType = dict[str, MetricBreakdown]
+TUNING_METRIC_EPSILON: Final = 1e-12
 
 
 class TuningQueryPathError(ValueError):
@@ -68,6 +72,7 @@ def tune_primary_settings(
 
     trials: list[dict[str, object]] = []
     best_settings: PrimaryRunSettings | None = None
+    best_query_type_metrics: MetricBreakdownByQueryType = {}
     best_metric = float("-inf")
     for theta_route in theta_candidates:
         for lambda_fixed in lambda_fixed_candidates:
@@ -82,7 +87,7 @@ def tune_primary_settings(
                     for category, value in lambda_by_category.items()
                 },
             )
-            metric_value = _average_b2_metric(
+            metric_value, query_type_metrics = _b2_metric_summary(
                 queries,
                 search_backend=search_backend,
                 settings=settings,
@@ -93,18 +98,28 @@ def tune_primary_settings(
                     "theta_route": settings.theta_route,
                     "lambda_fixed": settings.lambda_fixed,
                     "metric": metric_value,
+                    "query_type_metrics": query_type_metrics,
                 }
             )
-            if metric_value > best_metric:
+            if (
+                best_settings is None
+                or metric_value > best_metric + TUNING_METRIC_EPSILON
+                or (
+                    abs(metric_value - best_metric) <= TUNING_METRIC_EPSILON
+                    and settings.lambda_fixed > best_settings.lambda_fixed
+                )
+            ):
                 best_metric = metric_value
                 best_settings = settings
+                best_query_type_metrics = query_type_metrics
 
     if best_settings is None:
         raise ValueError("no tuning trials were evaluated")
-    diagnostics = {
+    diagnostics: dict[str, object] = {
         "best_variant": "B2-score",
         "metric_key": metric_key,
         "best_metric": best_metric,
+        "best_query_type_metrics": best_query_type_metrics,
         "trials": trials,
     }
     return best_settings, diagnostics
@@ -182,7 +197,7 @@ def tune_adaptive_lambda_parameters(
 
     if best_settings is None or best_parameters is None:
         raise ValueError("no adaptive tuning trials were evaluated")
-    diagnostics = {
+    diagnostics: dict[str, object] = {
         "best_variant": "P-score",
         "metric_key": metric_key,
         "best_metric": best_metric,
@@ -192,14 +207,15 @@ def tune_adaptive_lambda_parameters(
     return best_settings, diagnostics
 
 
-def _average_b2_metric(
+def _b2_metric_summary(
     queries: Sequence[QueryFeatures],
     *,
     search_backend: SearchBackend,
     settings: PrimaryRunSettings,
     metric_key: str,
-) -> float:
+) -> tuple[float, MetricBreakdownByQueryType]:
     values: list[float] = []
+    totals_by_query_type: dict[str, dict[str, float]] = {}
     for query in queries:
         result = run_b2_score(
             query,
@@ -214,7 +230,24 @@ def _average_b2_metric(
         if metric_key not in metrics:
             raise ValueError(f"unknown retrieval metric {metric_key!r}")
         values.append(float(metrics[metric_key]))
-    return sum(values) / len(values)
+        query_type = query.query_type or "unknown"
+        totals = totals_by_query_type.setdefault(query_type, {"query_count": 0.0})
+        totals["query_count"] += 1.0
+        for metric_name, metric_value in metrics.items():
+            totals[metric_name] = totals.get(metric_name, 0.0) + float(metric_value)
+    breakdown: MetricBreakdownByQueryType = {}
+    for query_type, totals in sorted(totals_by_query_type.items()):
+        count = int(totals["query_count"])
+        breakdown[query_type] = {
+            metric_name: total / count
+            for metric_name, total in sorted(totals.items())
+            if metric_name != "query_count"
+        }
+        breakdown[query_type]["query_count"] = count
+    return (
+        sum(values) / len(values),
+        breakdown,
+    )
 
 
 def _average_p_metric(
